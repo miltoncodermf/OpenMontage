@@ -185,7 +185,7 @@ class TestUniversalIngestorContract:
             assert result.success is True
             manifest = json.loads((workspace / "artifacts" / "input_manifest.json").read_text(encoding="utf-8"))
             link_source = next((s for s in manifest["sources"] if "link_to_outside" in s["filename"]), None)
-            assert link_source is None or link_source["status"] == "redacted_sensitive"
+            assert link_source is not None and link_source["status"] == "redacted_sensitive"
         finally:
             if outside_file.exists():
                 outside_file.unlink()
@@ -208,7 +208,16 @@ class TestMlxTTSProviderContract:
         assert len(timestamps) == 7
         assert timestamps[0]["word"] == "This"
         assert timestamps[-1]["word"] == "verification."
-        assert timestamps[-1]["endMs"] <= 2500.0
+        assert timestamps[-1]["endMs"] <= 2500.0 + 1.0
+
+        # Monotonic non-overlapping bounds check
+        for idx, ts in enumerate(timestamps):
+            assert 0 <= ts["startMs"] < ts["endMs"] <= 2500.0 + 1.0
+            if idx > 0:
+                assert ts["startMs"] >= timestamps[idx - 1]["endMs"]
+
+        # Word 4 ("test,") has a comma: should introduce a positive pause gap before word 5 ("for")
+        assert timestamps[5]["startMs"] > timestamps[4]["endMs"]
 
     def test_mlx_tts_capability_and_kokoro_synthesis(self, tmp_path, monkeypatch):
         out_wav = tmp_path / "kokoro_test.wav"

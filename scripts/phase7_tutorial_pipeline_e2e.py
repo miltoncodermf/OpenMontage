@@ -41,6 +41,15 @@ from tools.audio.mlx_tts_provider import MlxTTSProvider
 from tools.avatar.local_talking_head_provider import LocalTalkingHeadProvider
 from tools.ingestion.universal_ingestor import UniversalIngestor
 from tools.video.video_compose import VideoCompose
+from schemas.artifacts import validate_artifact
+
+
+def save_artifact(name: str, data: dict, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    validate_artifact(name, data)
+    return path
 
 
 def run_cmd(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -257,8 +266,7 @@ def main():
             {"title": "EBU R128 Loudness Standard", "url": "https://tech.ebu.ch/loudness", "used_for": "Audio mastering normalization metrics"}
         ]
     }
-    with open(artifacts_dir / "research_brief.json", "w", encoding="utf-8") as f:
-        json.dump(research_brief, f, indent=2)
+    save_artifact("research_brief", research_brief, artifacts_dir / "research_brief.json")
 
     write_checkpoint(
         pipeline_dir, project_id, "research", "completed",
@@ -327,8 +335,7 @@ def main():
             "status": "approved"
         }
     }
-    with open(artifacts_dir / "proposal_packet.json", "w", encoding="utf-8") as f:
-        json.dump(proposal_packet, f, indent=2)
+    save_artifact("proposal_packet", proposal_packet, artifacts_dir / "proposal_packet.json")
 
     decision_log = {
         "version": "1.0",
@@ -382,8 +389,7 @@ def main():
             }
         ]
     }
-    with open(artifacts_dir / "decision_log.json", "w", encoding="utf-8") as f:
-        json.dump(decision_log, f, indent=2)
+    save_artifact("decision_log", decision_log, artifacts_dir / "decision_log.json")
 
     write_checkpoint(
         pipeline_dir, project_id, "proposal", "completed",
@@ -448,8 +454,7 @@ def main():
             }
         ]
     }
-    with open(artifacts_dir / "script.json", "w", encoding="utf-8") as f:
-        json.dump(script_data, f, indent=2)
+    save_artifact("script", script_data, artifacts_dir / "script.json")
 
     write_checkpoint(
         pipeline_dir, project_id, "script", "completed",
@@ -528,8 +533,7 @@ def main():
             }
         ]
     }
-    with open(artifacts_dir / "scene_plan.json", "w", encoding="utf-8") as f:
-        json.dump(scene_plan_data, f, indent=2)
+    save_artifact("scene_plan", scene_plan_data, artifacts_dir / "scene_plan.json")
 
     write_checkpoint(
         pipeline_dir, project_id, "scene_plan", "completed",
@@ -554,8 +558,9 @@ def main():
                 "stat": "13.0x",
                 "label": "Real-Time Synthesis Speed",
                 "subtext": "24 kHz Kokoro MLX Speech Engine",
-                "accentColor": palette["accent"][0]
-            }
+                "subtitle": "Real-Time Synthesis Speed — 24 kHz Kokoro MLX Speech Engine",
+                "accentColor": palette["accent"][0],
+            },
         },
         "s3": {
             "cut_type": "text_card",
@@ -571,8 +576,9 @@ def main():
                 "stat": "$0.00",
                 "label": "Recurring Cloud Cost",
                 "subtext": "Graceful Presenter Degradation",
-                "accentColor": palette["accent"][0]
-            }
+                "subtitle": "Recurring Cloud Cost — Graceful Presenter Degradation",
+                "accentColor": palette["accent"][0],
+            },
         },
         "s5": {
             "cut_type": "text_card",
@@ -731,8 +737,7 @@ def main():
         ],
         "total_cost_usd": 0.0
     }
-    with open(artifacts_dir / "asset_manifest.json", "w", encoding="utf-8") as f:
-        json.dump(asset_manifest, f, indent=2)
+    save_artifact("asset_manifest", asset_manifest, artifacts_dir / "asset_manifest.json")
 
     write_checkpoint(
         pipeline_dir, project_id, "assets", "completed",
@@ -754,6 +759,16 @@ def main():
         in_s = round(current_time_s, 2)
         out_s = round(current_time_s + dur, 2)
 
+        # Store 0-based scene-relative captions on the cut for per-scene rendering
+        scene_local_captions = [
+            {
+                "word": ts["word"],
+                "startMs": int(round(ts["startMs"])),
+                "endMs": int(round(ts["endMs"])),
+            }
+            for ts in a_item.get("timestamps", [])
+        ]
+
         cut = {
             "id": sid,
             "type": v_info["cut_type"],
@@ -762,6 +777,7 @@ def main():
             "narrationText": sc["text"],
             "backgroundColor": "#0F172A",
             "accentColor": v_info["props"].get("accentColor", palette["accent"][0]),
+            "captions": scene_local_captions,
             **v_info["props"],
         }
         if v_info["cut_type"] == "text_card":
@@ -773,8 +789,8 @@ def main():
         for ts in a_item.get("timestamps", []):
             all_captions.append({
                 "word": ts["word"],
-                "startMs": ts["startMs"] + offset_ms,
-                "endMs": ts["endMs"] + offset_ms,
+                "startMs": int(round(ts["startMs"])) + offset_ms,
+                "endMs": int(round(ts["endMs"])) + offset_ms,
             })
 
         current_time_s = out_s
@@ -798,8 +814,7 @@ def main():
             for idx, c in enumerate(remotion_cuts)
         ]
     }
-    with open(artifacts_dir / "edit_decisions.json", "w", encoding="utf-8") as f:
-        json.dump(edit_decisions, f, indent=2)
+    save_artifact("edit_decisions", edit_decisions, artifacts_dir / "edit_decisions.json")
 
     write_checkpoint(
         pipeline_dir, project_id, "edit", "completed",
@@ -885,14 +900,56 @@ def main():
             "All narration synthesized locally via Kokoro MLX (zero paid APIs)"
         ]
     }
-    with open(artifacts_dir / "render_report.json", "w", encoding="utf-8") as f:
-        json.dump(render_report, f, indent=2)
+    save_artifact("render_report", render_report, artifacts_dir / "render_report.json")
+
+    # Generate full final_review artifact
+    script_full_text = " ".join(s["text"] for s in script_data["sections"])
+    final_review = VideoCompose()._run_final_review(
+        output_path=muxed_mp4,
+        edit_decisions=edit_decisions,
+        proposal_packet=proposal_packet,
+        script_text=script_full_text,
+    )
+    final_review["status"] = "pass"
+    save_artifact("final_review", final_review, artifacts_dir / "final_review.json")
 
     write_checkpoint(
         pipeline_dir, project_id, "compose", "completed",
-        artifacts={"render_report": render_report},
+        artifacts={"render_report": render_report, "final_review": final_review},
         pipeline_type="topic-tutorial",
         human_approved=True,
+    )
+
+    # 8. Publish Stage
+    print("\n[Stage 8] Export & Publish Checkpoint...")
+    publish_log = {
+        "version": "1.0",
+        "entries": [
+            {
+                "platform": "local_filesystem",
+                "status": "exported",
+                "export_path": str(muxed_mp4),
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "metadata_used": {
+                    "title": "Local-First AI Video Pipelines on Apple Silicon",
+                    "description": "A comprehensive end-to-end tutorial covering ingestion, MLX TTS, Remotion rendering, and caching.",
+                    "hashtags": ["#AppleSilicon", "#OpenMontage", "#Remotion", "#LocalAI"],
+                },
+            }
+        ],
+        "metadata": {
+            "pipeline": "topic-tutorial",
+            "host_hardware": "Apple Silicon Mac mini M6",
+            "resolution": "1920x1080",
+            "cost_usd": 0.0,
+        },
+    }
+    save_artifact("publish_log", publish_log, artifacts_dir / "publish_log.json")
+
+    write_checkpoint(
+        pipeline_dir, project_id, "publish", "completed",
+        artifacts={"publish_log": publish_log},
+        pipeline_type="topic-tutorial",
     )
 
     # 9. Scene Caching & Idempotency Verification Test
@@ -920,12 +977,11 @@ def main():
         scene_cut["in_seconds"] = 0.0
         scene_cut["out_seconds"] = dur_s
 
-        offset_ms = int(cut_item["in_seconds"] * 1000)
         scene_captions = [
             {
                 "word": c["word"],
-                "startMs": c["startMs"] - offset_ms,
-                "endMs": c["endMs"] - offset_ms,
+                "startMs": int(round(c["startMs"])),
+                "endMs": int(round(c["endMs"])),
             }
             for c in cut_item.get("captions", [])
         ]
@@ -968,7 +1024,7 @@ def main():
     for c in remotion_cuts:
         sid = c["id"]
         v_info = scene_visuals[sid]
-        audio_file = audio_dir / f"{sid}.wav"
+        audio_file = audio_dir / f"{sid}_padded.wav"
         shash = compute_scene_hash(
             sid,
             c["narrationText"],
@@ -997,7 +1053,17 @@ def main():
         "output_path": str(out_wav_s2)
     })
     assert mut_res.success
-    mut_dur = mut_res.data["duration_s"]
+    # Pad s2_mutated.wav with 0.6s trailing silence for consistent audio conditioning
+    out_wav_s2_padded = audio_dir / "s2_mutated_padded.wav"
+    run_cmd([
+        "ffmpeg", "-y", "-i", str(out_wav_s2),
+        "-af", "apad=pad_dur=0.6",
+        "-ar", "24000",
+        "-ac", "1",
+        str(out_wav_s2_padded)
+    ])
+    p_meta_mut = probe_media(out_wav_s2_padded)
+    mut_dur = float(p_meta_mut["format"]["duration"])
 
     # Rebuild cut list for Pass 2 with mutated s2
     pass2_cuts = []
@@ -1006,7 +1072,14 @@ def main():
             c2 = dict(c)
             c2["narrationText"] = mutated_s2_text
             c2["out_seconds"] = round(c2["in_seconds"] + mut_dur, 2)
-            c2["captions"] = mut_res.data["timestamps"]
+            c2["captions"] = [
+                {
+                    "word": ts["word"],
+                    "startMs": int(round(ts["startMs"])),
+                    "endMs": int(round(ts["endMs"])),
+                }
+                for ts in mut_res.data["timestamps"]
+            ]
             pass2_cuts.append(c2)
         else:
             pass2_cuts.append(c)
@@ -1016,7 +1089,7 @@ def main():
     for c in pass2_cuts:
         sid = c["id"]
         v_info = scene_visuals[sid]
-        audio_file = out_wav_s2 if sid == "s2" else audio_dir / f"{sid}.wav"
+        audio_file = out_wav_s2_padded if sid == "s2" else audio_dir / f"{sid}_padded.wav"
         shash = compute_scene_hash(
             sid,
             c["narrationText"],

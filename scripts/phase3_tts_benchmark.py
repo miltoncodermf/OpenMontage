@@ -27,6 +27,7 @@ if venv_bin not in os.environ.get("PATH", ""):
     os.environ["PATH"] = f"{venv_bin}:{os.environ.get('PATH', '')}"
 
 from tools.audio.piper_tts import PiperTTS
+from tools.audio.mlx_tts_provider import MlxTTSProvider
 from kokoro_mlx import KokoroTTS
 import soundfile as sf
 
@@ -187,6 +188,26 @@ def run_benchmark():
     print("\n--> Testing Word-Timestamp Validation & Discrepancy Reconciliation...")
     full_script_text = " ".join(s[3] for s in SECTIONS_TEXT)
     ground_truth_words = [w.strip(".,;:?!-()").lower() for w in full_script_text.split() if w.strip()]
+
+    # Verify MlxTTSProvider._build_word_timestamps() monotonic bounds & punctuation weighting
+    mlx_provider = MlxTTSProvider()
+    tested_section_text = SECTIONS_TEXT[0][3]
+    tested_duration = kokoro_results[0]["audio_duration_seconds"]
+    timestamps = mlx_provider._build_word_timestamps(tested_section_text, tested_duration)
+
+    assert len(timestamps) == len(tested_section_text.split()), "Timestamp count must match word count"
+    for idx, ts in enumerate(timestamps):
+        assert 0 <= ts["startMs"] < ts["endMs"] <= tested_duration * 1000.0 + 1.0, f"Timestamp {ts} out of bounds"
+        if idx > 0:
+            assert ts["startMs"] >= timestamps[idx - 1]["endMs"], "Overlapping timestamps detected"
+
+    # Verify clause punctuation produces positive gap
+    words_split = tested_section_text.split()
+    clause_word_indices = [i for i, w in enumerate(words_split[:-1]) if w.endswith((",", ";", ":", ".", "!", "?"))]
+    for c_idx in clause_word_indices:
+        assert timestamps[c_idx + 1]["startMs"] > timestamps[c_idx]["endMs"], f"Expected pause gap after '{words_split[c_idx]}'"
+
+    print(f"  [Verified] MlxTTSProvider generated {len(timestamps)} monotonic, punctuation-weighted word timestamps.")
 
     # Simulate alignment validation test
     # Test case 1: Exact alignment test

@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "generated_at": "2026-11-10T04:33:06Z",
+  "generated_at": "2026-11-10T04:56:50Z",
   "project_id": "tutorial-pipeline-mastery",
   "pipeline": "topic-tutorial",
   "host_hardware": {
@@ -17,19 +17,19 @@
       "duration_seconds": 47.77,
       "video_codec": "h264",
       "audio_codec": "aac",
-      "file_size_mb": 7.45,
-      "sha256": "254f46fa1d4bbe2c769357fc77477a371e1ee2863ed5564e5c701ae061a807cc"
+      "file_size_mb": 7.58,
+      "sha256": "1dfb2a9a7f1aaa7e2cc3277ca5b257d3b513d0cb392dc8885bca0a02c0a000e5"
     },
     "benchmark_4k": {
       "file_path": "/Users/nathan/workspace/OpenMontage/projects/tutorial-pipeline-mastery/renders/benchmark_4k_test.mp4",
       "resolution": "3840x2160",
       "duration_seconds": 5.056,
-      "render_time_seconds": 10.11
+      "render_time_seconds": 10.79
     }
   },
   "audio_mastering": {
-    "integrated_lufs": -14.62,
-    "true_peak_dbtp": -1.49,
+    "integrated_lufs": -14.61,
+    "true_peak_dbtp": -1.5,
     "lra_lu": 3.3
   },
   "caching_verification": {

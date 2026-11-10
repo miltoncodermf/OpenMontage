@@ -227,17 +227,27 @@ class UniversalIngestor(BaseTool):
             src_info = self._ingest_url(input_target, f"src_{source_counter:03d}")
             sources.append(src_info)
         else:
-            target_path = Path(input_target).expanduser().resolve()
+            target_path = Path(input_target).expanduser()
             if not target_path.exists():
                 return ToolResult(success=False, error=f"Target path does not exist: {target_path}")
 
             if target_path.is_file():
-                src_info = self._ingest_file(target_path, f"src_{source_counter:03d}", max_file_size_bytes)
+                src_info = self._ingest_file(
+                    target_path,
+                    f"src_{source_counter:03d}",
+                    max_file_size_bytes,
+                    allowed_root=target_path.parent,
+                )
                 sources.append(src_info)
             elif target_path.is_dir():
                 file_list = self._collect_directory_files(target_path, max_files)
                 for fpath in file_list:
-                    src_info = self._ingest_file(fpath, f"src_{source_counter:03d}", max_file_size_bytes)
+                    src_info = self._ingest_file(
+                        fpath,
+                        f"src_{source_counter:03d}",
+                        max_file_size_bytes,
+                        allowed_root=target_path,
+                    )
                     sources.append(src_info)
                     source_counter += 1
 
@@ -348,14 +358,6 @@ class UniversalIngestor(BaseTool):
             ]
             for file in sorted(files):
                 full_path = Path(root) / file
-                # Check symlink escapes
-                if full_path.is_symlink():
-                    try:
-                        resolved_target = full_path.resolve()
-                        if not resolved_target.is_relative_to(root_resolved) or _is_secret_filename(resolved_target.name):
-                            continue
-                    except Exception:
-                        continue
                 rel_path = rel_root / file
                 if any(fnmatch.fnmatch(str(rel_path), pat) or fnmatch.fnmatch(file, pat) for pat in git_ignore_patterns):
                     continue
@@ -364,29 +366,74 @@ class UniversalIngestor(BaseTool):
                     return collected
         return collected
 
-    def _ingest_file(self, path: Path, source_id: str, max_file_size_bytes: int) -> dict[str, Any]:
+    def _ingest_file(
+        self,
+        path: Path,
+        source_id: str,
+        max_file_size_bytes: int,
+        allowed_root: Optional[Path] = None,
+    ) -> dict[str, Any]:
         filename = path.name
         rel_str = str(path)
 
-        # 1. Check for secret filename (both direct and resolved)
-        try:
-            resolved_target = path.resolve()
-            if _is_secret_filename(filename) or _is_secret_filename(resolved_target.name):
-                return {
-                    "source_id": source_id,
-                    "file_path": rel_str,
-                    "filename": filename,
-                    "status": "redacted_sensitive",
-                    "sha256": None,
-                    "word_count": 0,
-                    "byte_size": path.stat().st_size if path.exists() else 0,
-                    "summary": "Sensitive configuration or secret file excluded for safety",
-                    "content": "",
-                }
-        except Exception:
-            pass
+        # 1. Immediate filename secret check before any filesystem resolution
+        if _is_secret_filename(filename):
+            return {
+                "source_id": source_id,
+                "file_path": rel_str,
+                "filename": filename,
+                "status": "redacted_sensitive",
+                "sha256": None,
+                "word_count": 0,
+                "byte_size": 0,
+                "summary": "Sensitive configuration or secret file excluded for safety",
+                "content": "",
+            }
 
-        # 2. Check existence
+        # 2. Symlink & workspace boundary verification
+        try:
+            resolved_target = path.resolve(strict=True)
+        except Exception as exc:
+            return {
+                "source_id": source_id,
+                "file_path": rel_str,
+                "filename": filename,
+                "status": "unsupported",
+                "error": f"Unresolvable path or broken symlink: {exc}",
+                "sha256": None,
+                "word_count": 0,
+                "byte_size": 0,
+                "content": "",
+            }
+
+        if _is_secret_filename(resolved_target.name):
+            return {
+                "source_id": source_id,
+                "file_path": rel_str,
+                "filename": filename,
+                "status": "redacted_sensitive",
+                "sha256": None,
+                "word_count": 0,
+                "byte_size": 0,
+                "summary": "Symlink to sensitive file excluded for safety",
+                "content": "",
+            }
+
+        if allowed_root is not None and not resolved_target.is_relative_to(allowed_root.resolve()):
+            return {
+                "source_id": source_id,
+                "file_path": rel_str,
+                "filename": filename,
+                "status": "redacted_sensitive",
+                "error": "Symlink escapes allowed input directory boundary",
+                "sha256": None,
+                "word_count": 0,
+                "byte_size": 0,
+                "summary": "External symlink blocked by workspace boundary check",
+                "content": "",
+            }
+
+        # 3. Check existence
         if not path.is_file():
             return {
                 "source_id": source_id,
@@ -754,35 +801,35 @@ class UniversalIngestor(BaseTool):
             from bs4 import BeautifulSoup
 
             # Stream response and cap at 5MB
-            resp = requests.get(
+            with requests.get(
                 url,
                 timeout=15,
-                headers={"User-Agent": "OpenMontage-UniversalIngestor/1.0"},
+                headers={"User-Agent": "OpenMontage-UniversalIngestor/1.1"},
                 stream=True,
                 allow_redirects=False,
-            )
-            if resp.status_code != 200:
-                return {
-                    "source_id": source_id,
-                    "file_path": url,
-                    "filename": urllib.parse.urlparse(url).path.split("/")[-1] or "index.html",
-                    "file_type": "url",
-                    "status": "unsupported",
-                    "error": f"HTTP {resp.status_code}: {resp.reason}",
-                    "sha256": sha256_hash,
-                    "word_count": 0,
-                    "byte_size": 0,
-                    "content": "",
-                }
+            ) as resp:
+                if resp.status_code != 200:
+                    return {
+                        "source_id": source_id,
+                        "file_path": url,
+                        "filename": urllib.parse.urlparse(url).path.split("/")[-1] or "index.html",
+                        "file_type": "url",
+                        "status": "unsupported",
+                        "error": f"HTTP {resp.status_code}: {resp.reason}",
+                        "sha256": sha256_hash,
+                        "word_count": 0,
+                        "byte_size": 0,
+                        "content": "",
+                    }
 
-            content_chunks = []
-            curr_len = 0
-            for chunk in resp.iter_content(chunk_size=65536):
-                curr_len += len(chunk)
-                content_chunks.append(chunk)
-                if curr_len > 5 * 1024 * 1024:
-                    break
-            raw_bytes = b"".join(content_chunks)
+                content_chunks = []
+                curr_len = 0
+                for chunk in resp.iter_content(chunk_size=65536):
+                    curr_len += len(chunk)
+                    content_chunks.append(chunk)
+                    if curr_len > 5 * 1024 * 1024:
+                        break
+                raw_bytes = b"".join(content_chunks)
 
             soup = BeautifulSoup(raw_bytes, "html.parser")
             for tag in soup(["script", "style", "noscript", "svg", "nav", "footer"]):
