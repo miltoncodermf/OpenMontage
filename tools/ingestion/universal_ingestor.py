@@ -10,9 +10,11 @@ from __future__ import annotations
 import csv
 import fnmatch
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import time
 import urllib.parse
@@ -31,6 +33,9 @@ from tools.base_tool import (
     ToolStatus,
     ToolTier,
 )
+
+# Media file extensions exempt from in-memory byte loading
+MEDIA_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".wav", ".mp3", ".m4a", ".aac"}
 
 # Secret file and pattern regexes
 SECRET_FILE_PATTERNS = [
@@ -53,9 +58,46 @@ SECRET_CONTENT_REGEXES = [
     re.compile(r"(ghp_[A-Za-z0-9]{30,})"),  # GitHub personal access tokens
 ]
 
+PROMPT_INJECTION_REGEX = re.compile(
+    r"(?i)(ignore\s+all\s+previous|system\s+prompt\s+override|rm\s+-rf|call_api:)"
+)
 
-def _hash_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+
+def _hash_file_stream(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _validate_public_url(url: str) -> Optional[str]:
+    """Return error string if URL targets a non-HTTP scheme or private/loopback/reserved IP."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return f"Unsupported URL scheme: {parsed.scheme}"
+    hostname = parsed.hostname
+    if not hostname:
+        return "URL missing hostname"
+    if hostname.lower() in ("localhost", "ip6-localhost"):
+        return "Loopback hostname is blocked (SSRF protection)"
+    try:
+        addr_info = socket.getaddrinfo(hostname, None)
+        for item in addr_info:
+            ip_str = item[4][0]
+            ip_obj = ipaddress.ip_address(ip_str)
+            if (
+                ip_obj.is_private
+                or ip_obj.is_loopback
+                or ip_obj.is_link_local
+                or ip_obj.is_multicast
+                or ip_obj.is_reserved
+                or ip_obj.is_unspecified
+            ):
+                return f"URL resolves to restricted IP {ip_str} (SSRF protection)"
+    except socket.gaierror as exc:
+        return f"DNS resolution failed for {hostname}: {exc}"
+    return None
 
 
 def _is_secret_filename(name: str) -> bool:
@@ -74,7 +116,7 @@ def _redact_secrets(text: str) -> str:
 
 class UniversalIngestor(BaseTool):
     name = "universal_ingestor"
-    version = "1.0.0"
+    version = "1.1.0"
     tier = ToolTier.SOURCE
     capability = "ingestion"
     provider = "local"
@@ -179,7 +221,6 @@ class UniversalIngestor(BaseTool):
         sources: list[dict[str, Any]] = []
         source_counter = 1
 
-        # Check if URL
         is_url = input_target.startswith("http://") or input_target.startswith("https://")
 
         if is_url:
@@ -200,19 +241,22 @@ class UniversalIngestor(BaseTool):
                     sources.append(src_info)
                     source_counter += 1
 
-        # Fact sheet generation
+        # Fact sheet generation - only from prose documents, never raw code
         facts: list[dict[str, Any]] = []
         if extract_claims:
             fact_counter = 1
             for src in sources:
-                if src.get("status") == "supported" and src.get("content"):
+                if (
+                    src.get("status") == "supported"
+                    and src.get("content")
+                    and src.get("file_type") in {"text", "pdf", "docx", "pptx", "url"}
+                ):
                     extracted = self._extract_facts(src["content"], src["source_id"])
                     for fact in extracted:
                         fact["fact_id"] = f"fact_{fact_counter:03d}"
                         facts.append(fact)
                         fact_counter += 1
 
-        # Build manifests
         total_words = sum(s.get("word_count", 0) for s in sources)
         supported_count = sum(1 for s in sources if s.get("status") == "supported")
         unsupported_count = len(sources) - supported_count
@@ -266,6 +310,7 @@ class UniversalIngestor(BaseTool):
 
     def _collect_directory_files(self, root_dir: Path, max_files: int) -> list[Path]:
         collected: list[Path] = []
+        root_resolved = root_dir.resolve()
         git_ignore_patterns = [
             ".git",
             ".git/*",
@@ -297,16 +342,24 @@ class UniversalIngestor(BaseTool):
 
         for root, dirs, files in os.walk(root_dir):
             rel_root = Path(root).relative_to(root_dir)
-            # Filter dirs in-place
             dirs[:] = [
                 d for d in dirs
                 if not any(fnmatch.fnmatch(str(rel_root / d), pat) or fnmatch.fnmatch(d, pat) for pat in git_ignore_patterns)
             ]
             for file in sorted(files):
+                full_path = Path(root) / file
+                # Check symlink escapes
+                if full_path.is_symlink():
+                    try:
+                        resolved_target = full_path.resolve()
+                        if not resolved_target.is_relative_to(root_resolved) or _is_secret_filename(resolved_target.name):
+                            continue
+                    except Exception:
+                        continue
                 rel_path = rel_root / file
                 if any(fnmatch.fnmatch(str(rel_path), pat) or fnmatch.fnmatch(file, pat) for pat in git_ignore_patterns):
                     continue
-                collected.append(Path(root) / file)
+                collected.append(full_path)
                 if len(collected) >= max_files:
                     return collected
         return collected
@@ -315,21 +368,25 @@ class UniversalIngestor(BaseTool):
         filename = path.name
         rel_str = str(path)
 
-        # 1. Check for secret filename
-        if _is_secret_filename(filename):
-            return {
-                "source_id": source_id,
-                "file_path": rel_str,
-                "filename": filename,
-                "status": "redacted_sensitive",
-                "sha256": None,
-                "word_count": 0,
-                "byte_size": path.stat().st_size if path.exists() else 0,
-                "summary": "Sensitive configuration or secret file excluded for safety",
-                "content": "",
-            }
+        # 1. Check for secret filename (both direct and resolved)
+        try:
+            resolved_target = path.resolve()
+            if _is_secret_filename(filename) or _is_secret_filename(resolved_target.name):
+                return {
+                    "source_id": source_id,
+                    "file_path": rel_str,
+                    "filename": filename,
+                    "status": "redacted_sensitive",
+                    "sha256": None,
+                    "word_count": 0,
+                    "byte_size": path.stat().st_size if path.exists() else 0,
+                    "summary": "Sensitive configuration or secret file excluded for safety",
+                    "content": "",
+                }
+        except Exception:
+            pass
 
-        # 2. Check existence & size
+        # 2. Check existence
         if not path.is_file():
             return {
                 "source_id": source_id,
@@ -343,7 +400,53 @@ class UniversalIngestor(BaseTool):
                 "content": "",
             }
 
+        suffix = path.suffix.lower()
         byte_size = path.stat().st_size
+
+        # 3. Media files: exempt from max_file_size_bytes (allow up to 2GB) and avoid reading into RAM
+        if suffix in MEDIA_SUFFIXES:
+            if byte_size > 2 * 1024 * 1024 * 1024:
+                return {
+                    "source_id": source_id,
+                    "file_path": rel_str,
+                    "filename": filename,
+                    "status": "unsupported",
+                    "error": f"Media size ({byte_size} bytes) exceeds 2GB ceiling",
+                    "sha256": None,
+                    "word_count": 0,
+                    "byte_size": byte_size,
+                    "content": "",
+                }
+            try:
+                sha256_hash = _hash_file_stream(path)
+                media_meta = self._probe_media(path)
+                return {
+                    "source_id": source_id,
+                    "file_path": rel_str,
+                    "filename": filename,
+                    "file_type": "media",
+                    "status": "supported",
+                    "sha256": sha256_hash,
+                    "metadata": media_meta,
+                    "word_count": 0,
+                    "byte_size": byte_size,
+                    "summary": f"Media file: duration={media_meta.get('duration_s', 0)}s, format={suffix.lstrip('.')}",
+                    "content": f"Media file {filename} (Duration: {media_meta.get('duration_s')}s, Codec: {media_meta.get('codec')})",
+                }
+            except Exception as exc:
+                return {
+                    "source_id": source_id,
+                    "file_path": rel_str,
+                    "filename": filename,
+                    "status": "unsupported",
+                    "error": f"Media probe error: {exc}",
+                    "sha256": None,
+                    "word_count": 0,
+                    "byte_size": byte_size,
+                    "content": "",
+                }
+
+        # 4. Check size for documents and code
         if byte_size > max_file_size_bytes:
             return {
                 "source_id": source_id,
@@ -357,10 +460,10 @@ class UniversalIngestor(BaseTool):
                 "content": "",
             }
 
-        # Compute SHA256
+        # Compute SHA256 in 64KB chunks
         try:
+            sha256_hash = _hash_file_stream(path)
             raw_bytes = path.read_bytes()
-            sha256_hash = _hash_bytes(raw_bytes)
         except Exception as exc:
             return {
                 "source_id": source_id,
@@ -373,8 +476,6 @@ class UniversalIngestor(BaseTool):
                 "byte_size": byte_size,
                 "content": "",
             }
-
-        suffix = path.suffix.lower()
 
         try:
             # Markdown & Plain text
@@ -603,24 +704,6 @@ class UniversalIngestor(BaseTool):
                         "content": "",
                     }
 
-            # Media files (.mp4, .mov, .wav, .mp3)
-            if suffix in [".mp4", ".mov", ".mkv", ".webm", ".wav", ".mp3", ".m4a", ".aac"]:
-                media_meta = self._probe_media(path)
-                return {
-                    "source_id": source_id,
-                    "file_path": rel_str,
-                    "filename": filename,
-                    "file_type": "media",
-                    "status": "supported",
-                    "sha256": sha256_hash,
-                    "metadata": media_meta,
-                    "word_count": 0,
-                    "byte_size": byte_size,
-                    "summary": f"Media file: duration={media_meta.get('duration_s', 0)}s, format={suffix.lstrip('.')}",
-                    "content": f"Media file {filename} (Duration: {media_meta.get('duration_s')}s, Codec: {media_meta.get('codec')})",
-                }
-
-            # Unrecognized format
             return {
                 "source_id": source_id,
                 "file_path": rel_str,
@@ -649,11 +732,35 @@ class UniversalIngestor(BaseTool):
 
     def _ingest_url(self, url: str, source_id: str) -> dict[str, Any]:
         sha256_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+        # SSRF Protection
+        ssrf_err = _validate_public_url(url)
+        if ssrf_err:
+            return {
+                "source_id": source_id,
+                "file_path": url,
+                "filename": url,
+                "file_type": "url",
+                "status": "unsupported",
+                "error": ssrf_err,
+                "sha256": sha256_hash,
+                "word_count": 0,
+                "byte_size": 0,
+                "content": "",
+            }
+
         try:
             import requests
             from bs4 import BeautifulSoup
 
-            resp = requests.get(url, timeout=15, headers={"User-Agent": "OpenMontage-UniversalIngestor/1.0"})
+            # Stream response and cap at 5MB
+            resp = requests.get(
+                url,
+                timeout=15,
+                headers={"User-Agent": "OpenMontage-UniversalIngestor/1.0"},
+                stream=True,
+                allow_redirects=False,
+            )
             if resp.status_code != 200:
                 return {
                     "source_id": source_id,
@@ -664,11 +771,20 @@ class UniversalIngestor(BaseTool):
                     "error": f"HTTP {resp.status_code}: {resp.reason}",
                     "sha256": sha256_hash,
                     "word_count": 0,
-                    "byte_size": len(resp.content),
+                    "byte_size": 0,
                     "content": "",
                 }
 
-            soup = BeautifulSoup(resp.text, "html.parser")
+            content_chunks = []
+            curr_len = 0
+            for chunk in resp.iter_content(chunk_size=65536):
+                curr_len += len(chunk)
+                content_chunks.append(chunk)
+                if curr_len > 5 * 1024 * 1024:
+                    break
+            raw_bytes = b"".join(content_chunks)
+
+            soup = BeautifulSoup(raw_bytes, "html.parser")
             for tag in soup(["script", "style", "noscript", "svg", "nav", "footer"]):
                 tag.extract()
             text = soup.get_text(separator="\n")
@@ -685,7 +801,7 @@ class UniversalIngestor(BaseTool):
                 "status": "supported",
                 "sha256": sha256_hash,
                 "word_count": len(clean_text.split()),
-                "byte_size": len(resp.content),
+                "byte_size": len(raw_bytes),
                 "summary": f"Web document: {title} ({len(clean_text.split())} words)",
                 "content": clean_text[:20000],
             }
@@ -726,19 +842,22 @@ class UniversalIngestor(BaseTool):
 
     def _extract_facts(self, text: str, source_id: str) -> list[dict[str, Any]]:
         facts: list[dict[str, Any]] = []
-        # Extract declarative sentences or bullet points with numeric facts or strong assertions
         lines = text.splitlines()
         for line in lines:
             line_str = line.strip().lstrip("-*#0123456789. ")
-            if len(line_str) > 25 and len(line_str) < 300:
-                # Look for numbers, percentages, dates, or key action terms
+            # Prompt injection defense
+            if PROMPT_INJECTION_REGEX.search(line_str):
+                continue
+
+            if 25 < len(line_str) < 300:
                 if re.search(r"(\d+%|\$\d+|\b\d{4}\b|\bcores\b|\bGB\b|\bMB\b|\bsec\b|\barchitecture\b|\bpipeline\b|\bmodule\b|\bstage\b)", line_str, re.IGNORECASE):
                     facts.append({
                         "claim": line_str,
                         "source_id": source_id,
                         "context": line.strip()[:150],
-                        "verified": True,
+                        "verified": False,
+                        "untrusted_source": True,
                     })
-                    if len(facts) >= 20:  # limit per source
+                    if len(facts) >= 20:
                         break
         return facts

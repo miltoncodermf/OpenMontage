@@ -8,16 +8,7 @@
     "operating_policy": "Local-first ($0.00 recurring subscriptions, ALLOW_PAID_APIS=false)"
   },
   "overall_feasibility_verdict": "INFEASIBLE_ON_M6_LOCAL",
-  "executive_summary": (
-    "Local talking-head generation on Apple Silicon Mac mini M6 is currently infeasible for commercial, zero-cost production. "
-    "All candidate local avatar models (SadTalker, Wav2Lip, MuseTalk, LivePortrait) require NVIDIA CUDA extensions, "
-    "exceed pre-download checkpoint size limits (1.2 GB to 4.5 GB), carry restrictive Non-Commercial licenses (CC BY-NC 4.0), "
-    "or suffer severe CPU emulation latency (RTF > 15x). In accordance with the blueprint protocol, fake workarounds "
-    "(such as static portraits or idle audio-reactive loops) are strictly rejected. The custom topic-tutorial pipeline "
-    "must implement graceful fallback: presenter beats automatically route to high-engagement visual scenes "
-    "(animated diagrams, charts, terminal showcases) and mark presenter generation as 'skipped_unavailable' "
-    "unless an explicit pay-per-use cloud avatar provider (e.g. HeyGen or Kling) is human-approved."
-  ),
+  "executive_summary": "Local talking-head generation on Apple Silicon Mac mini M6 is currently infeasible for commercial, zero-cost production. All candidate local avatar models (SadTalker, Wav2Lip, MuseTalk, LivePortrait) require NVIDIA CUDA extensions, exceed pre-download checkpoint size limits (1.2 GB to 4.5 GB), carry restrictive Non-Commercial licenses (CC BY-NC 4.0), or suffer severe CPU emulation latency (RTF > 15x). In accordance with the blueprint protocol, fake workarounds (such as static portraits or idle audio-reactive loops) are strictly rejected. The custom topic-tutorial pipeline must implement graceful fallback: presenter beats automatically route to high-engagement visual scenes (animated diagrams, charts, terminal showcases) and mark presenter generation as 'skipped_unavailable' unless an explicit pay-per-use cloud avatar provider (e.g. HeyGen or Kling) is human-approved.",
   "candidates_evaluated": [
     {
       "model_name": "SadTalker",
@@ -111,16 +102,6 @@
     }
   ],
   "architectural_recommendation_for_phase5": {
-    "handling_of_presenter_scenes": (
-      "1. Automatic Graceful Degradation: When no approved cloud avatar provider is active, "
-      "all presenter scenes (presenter_fullscreen, presenter_pip) automatically transform into "
-      "subject-appropriate visual scenes (diagram_or_flowchart, data_chart_or_timeline, "
-      "terminal_scene, or code_snippet). "
-      "2. Honest Status Logging: The presenter stage records 'presenter_status: skipped_unavailable' "
-      "with $0.00 cost and zero fake idle loops. "
-      "3. Opt-In Approved Fallback: If the user explicitly requests an avatar in a future project "
-      "and approves the cost, route to a tested cloud provider (e.g., HeyGen API or Kling Avatar) "
-      "with per-project cost confirmation."
-    )
+    "handling_of_presenter_scenes": "1. Automatic Graceful Degradation: When no approved cloud avatar provider is active, all presenter scenes (presenter_fullscreen, presenter_pip) automatically transform into subject-appropriate visual scenes (diagram_or_flowchart, data_chart_or_timeline, terminal_scene, or code_snippet). 2. Honest Status Logging: The presenter stage records 'presenter_status: skipped_unavailable' with $0.00 cost and zero fake idle loops. 3. Opt-In Approved Fallback: If the user explicitly requests an avatar in a future project and approves the cost, route to a tested cloud provider (e.g., HeyGen API or Kling Avatar) with per-project cost confirmation."
   }
 }

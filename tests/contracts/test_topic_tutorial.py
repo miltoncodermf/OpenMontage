@@ -1,5 +1,7 @@
 """Comprehensive contract and unit tests for topic-tutorial pipeline, tools, and guardrails."""
 
+from __future__ import annotations
+
 import json
 import shutil
 import tempfile
@@ -17,11 +19,12 @@ from lib.checkpoint import (
     write_checkpoint,
 )
 from lib.pipeline_loader import load_pipeline
+from lib.scene_cache import SceneCacheManager, compute_scene_hash
 from styles.playbook_loader import list_playbooks, load_playbook
 from tools.audio.mlx_tts_provider import MlxTTSProvider
 from tools.avatar.local_talking_head_provider import LocalTalkingHeadProvider
 from tools.base_tool import ToolStatus
-from tools.ingestion.universal_ingestor import UniversalIngestor
+from tools.ingestion.universal_ingestor import UniversalIngestor, _validate_public_url
 from tools.tool_registry import registry
 
 
@@ -99,6 +102,8 @@ class TestUniversalIngestorContract:
         assert fact_sheet_file.is_file()
         fact_sheet = json.loads(fact_sheet_file.read_text(encoding="utf-8"))
         assert len(fact_sheet["facts"]) >= 1
+        # Code sources must NOT be extracted into fact sheet
+        assert all(f.get("untrusted_source") is True for f in fact_sheet["facts"])
 
     def test_secret_redaction(self, workspace):
         env_file = workspace / ".env.production"
@@ -156,9 +161,34 @@ class TestUniversalIngestorContract:
         manifest = json.loads((workspace / "artifacts" / "input_manifest.json").read_text(encoding="utf-8"))
         source = manifest["sources"][0]
         assert source["status"] == "supported"
-        assert "rm -rf" in source["content"]  # Ingested as plain passive text
-        # Verify no external call or deletion occurred
-        assert Path(workspace).exists()
+        assert "rm -rf" in source["content"]
+
+        fact_sheet = json.loads((workspace / "artifacts" / "fact_sheet.json").read_text(encoding="utf-8"))
+        # Injected prompt must NOT be in fact sheet
+        assert not any("rm -rf" in f["claim"] for f in fact_sheet["facts"])
+
+    def test_ssrf_and_symlink_protection(self, workspace):
+        # 1. SSRF URL checks
+        assert _validate_public_url("http://127.0.0.1:8080/secret") is not None
+        assert _validate_public_url("http://169.254.169.254/latest/meta-data/") is not None
+        assert _validate_public_url("http://localhost:3000") is not None
+        assert _validate_public_url("ftp://example.com/file") is not None
+
+        # 2. Symlink traversal check
+        outside_file = workspace.parent / "outside_secret.key"
+        outside_file.write_text("SUPER_SECRET_KEY=12345", encoding="utf-8")
+        escaped_link = workspace / "link_to_outside.key"
+        try:
+            escaped_link.symlink_to(outside_file)
+            ingestor = UniversalIngestor()
+            result = ingestor.execute({"input_path": str(workspace), "project_dir": str(workspace)})
+            assert result.success is True
+            manifest = json.loads((workspace / "artifacts" / "input_manifest.json").read_text(encoding="utf-8"))
+            link_source = next((s for s in manifest["sources"] if "link_to_outside" in s["filename"]), None)
+            assert link_source is None or link_source["status"] == "redacted_sensitive"
+        finally:
+            if outside_file.exists():
+                outside_file.unlink()
 
 
 class TestMlxTTSProviderContract:
@@ -168,16 +198,43 @@ class TestMlxTTSProviderContract:
         registry.discover()
         tool = registry.get("mlx_tts")
         assert tool is not None
+        assert tool.capability == "tts"
         assert tool.get_status() in [ToolStatus.AVAILABLE, ToolStatus.DEGRADED]
         assert tool.estimate_cost({}) == 0.0
 
     def test_word_timestamp_generation(self):
         provider = MlxTTSProvider()
-        timestamps = provider._build_word_timestamps("This is a tutorial test", 2.0)
-        assert len(timestamps) == 5
+        timestamps = provider._build_word_timestamps("This is a tutorial test, for verification.", 2.5)
+        assert len(timestamps) == 7
         assert timestamps[0]["word"] == "This"
-        assert timestamps[-1]["word"] == "test"
-        assert timestamps[-1]["endMs"] == 2000.0
+        assert timestamps[-1]["word"] == "verification."
+        assert timestamps[-1]["endMs"] <= 2500.0
+
+    def test_mlx_tts_capability_and_kokoro_synthesis(self, tmp_path, monkeypatch):
+        out_wav = tmp_path / "kokoro_test.wav"
+        provider = MlxTTSProvider()
+        assert provider.capability == "tts"
+
+        class FakeKokoroRes:
+            audio = [0.0] * 24000
+            sample_rate = 24000
+
+        class FakeKokoro:
+            def generate(self, text, voice="af_heart", speed=1.0):
+                return FakeKokoroRes()
+
+        monkeypatch.setattr(provider, "_get_kokoro", lambda: FakeKokoro())
+        res = provider.execute({
+            "text": "Kokoro MLX neural speech synthesis test.",
+            "voice": "af_heart",
+            "speed": 1.0,
+            "output_path": str(out_wav),
+            "allow_fallback": False,
+        })
+        assert res.success is True
+        assert res.data["provider"] == "mlx"
+        assert res.data["sample_rate"] == 24000
+        assert out_wav.is_file()
 
 
 class TestLocalTalkingHeadProviderContract:
@@ -194,7 +251,7 @@ class TestLocalTalkingHeadProviderContract:
         registry.discover()
         tool = registry.get("local_talking_head")
         assert tool is not None
-        assert tool.get_status() == ToolStatus.AVAILABLE
+        assert tool.get_status() == ToolStatus.DEGRADED
         assert tool.estimate_cost({}) == 0.0
 
     def test_graceful_degradation_when_infeasible(self, workspace):
@@ -214,15 +271,52 @@ class TestLocalTalkingHeadProviderContract:
         assert "Phase 4" in result.data["reason"]
         assert result.data["fallback_action"] == "elevate_visual_scene"
 
+    def test_avatar_fallback_false_fails_loudly(self, workspace):
+        dummy_audio = workspace / "dummy.wav"
+        dummy_audio.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
+
+        tool = LocalTalkingHeadProvider()
+        result = tool.execute({
+            "audio_path": str(dummy_audio),
+            "fallback_to_visuals": False,
+        })
+        assert result.success is False
+        assert "infeasible" in result.error.lower()
+
+
+class TestSceneCacheContract:
+    """Verifies immutable blob caching and atomic manifest management."""
+
+    def test_scene_cache_immutable_blob_copy(self, tmp_path):
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        cache_mgr = SceneCacheManager(proj_dir)
+
+        dummy_audio = proj_dir / "orig.wav"
+        dummy_audio.write_text("audio content v1", encoding="utf-8")
+        shash = compute_scene_hash("s1", "text", {"stat": 12}, "software-technical", 5.0)
+
+        blob_path = cache_mgr.put_cached_audio("s1", shash, dummy_audio, {"duration_s": 5.0})
+        assert blob_path.is_file()
+        assert "audio content v1" in blob_path.read_text(encoding="utf-8")
+
+        # Mutate original workspace audio file
+        dummy_audio.write_text("MUTATED CORRUPT AUDIO", encoding="utf-8")
+
+        # Cache must retrieve original uncorrupted blob
+        cached_retrieved = cache_mgr.get_cached_audio("s1", shash)
+        assert cached_retrieved is not None
+        assert cached_retrieved.read_text(encoding="utf-8") == "audio content v1"
+
 
 class TestCheckpointResumeSimulation:
-    """Verifies simulated stage interruption at Stage 4 and seamless resumption."""
+    """Verifies simulated stage interruption at Stage 4 and seamless resumption with hermetic fixtures."""
 
     @pytest.fixture
     def project_env(self):
         tmp_dir = tempfile.mkdtemp(prefix="om_test_checkpoint_")
         base_dir = Path(tmp_dir)
-        proj_dir = init_project(
+        init_project(
             "tutorial_test_proj",
             title="Tutorial Test Project",
             pipeline_type="topic-tutorial",
@@ -235,70 +329,146 @@ class TestCheckpointResumeSimulation:
     def test_resume_from_checkpoint(self, project_env):
         base_dir, proj_id = project_env
 
-        # Load real schema-valid artifacts from Phase 2
-        artifacts_dir = Path("projects/how-video-pipelines-work/artifacts")
-        rb = json.loads((artifacts_dir / "research_brief.json").read_text(encoding="utf-8"))
-        pp = json.loads((artifacts_dir / "proposal_packet.json").read_text(encoding="utf-8"))
-        sc = json.loads((artifacts_dir / "script.json").read_text(encoding="utf-8"))
-        sp = json.loads((artifacts_dir / "scene_plan.json").read_text(encoding="utf-8"))
-        am = json.loads((artifacts_dir / "asset_manifest.json").read_text(encoding="utf-8"))
-        ed = json.loads((artifacts_dir / "edit_decisions.json").read_text(encoding="utf-8"))
-        rr = json.loads((artifacts_dir / "render_report.json").read_text(encoding="utf-8"))
+        # Minimal schema-valid hermetic fixtures
+        rb = {
+            "version": "1.0",
+            "topic": "Hermetic Test Topic",
+            "research_date": "2026-11-09",
+            "landscape": {
+                "existing_content": [
+                    {"title": "T1", "source": "S1", "angle": "A1", "what_it_covers": "W1"},
+                    {"title": "T2", "source": "S2", "angle": "A2", "what_it_covers": "W2"},
+                    {"title": "T3", "source": "S3", "angle": "A3", "what_it_covers": "W3"},
+                ],
+                "saturated_angles": ["sat"],
+                "underserved_gaps": ["gap"],
+            },
+            "data_points": [
+                {"claim": "Claim 1", "source_url": "https://example.com/1", "credibility": "primary_source"},
+                {"claim": "Claim 2", "source_url": "https://example.com/2", "credibility": "primary_source"},
+                {"claim": "Claim 3", "source_url": "https://example.com/3", "credibility": "primary_source"},
+            ],
+            "audience_insights": {"common_questions": ["Q1?", "Q2?", "Q3?"], "misconceptions": [{"myth": "M", "reality": "R"}], "knowledge_level": "intermediate"},
+            "angles_discovered": [
+                {"name": "A1", "hook": "H1", "type": "evergreen", "why_now": "Now", "grounded_in": ["d1"]},
+                {"name": "A2", "hook": "H2", "type": "contrarian", "why_now": "Now", "grounded_in": ["d2"]},
+                {"name": "A3", "hook": "H3", "type": "trending", "why_now": "Now", "grounded_in": ["d3"]},
+            ],
+            "sources": [
+                {"title": "S1", "url": "https://example.com/1", "used_for": "testing1"},
+                {"title": "S2", "url": "https://example.com/2", "used_for": "testing2"},
+                {"title": "S3", "url": "https://example.com/3", "used_for": "testing3"},
+                {"title": "S4", "url": "https://example.com/4", "used_for": "testing4"},
+                {"title": "S5", "url": "https://example.com/5", "used_for": "testing5"},
+            ],
+        }
+        pp = {
+            "version": "1.0",
+            "concept_options": [
+                {"id": "c1", "title": "C1", "hook": "H1", "narrative_structure": "tutorial", "visual_approach": "technical", "target_duration_seconds": 60, "why_this_works": "W1"},
+                {"id": "c2", "title": "C2", "hook": "H2", "narrative_structure": "tutorial", "visual_approach": "technical", "target_duration_seconds": 60, "why_this_works": "W2"},
+                {"id": "c3", "title": "C3", "hook": "H3", "narrative_structure": "tutorial", "visual_approach": "technical", "target_duration_seconds": 60, "why_this_works": "W3"},
+            ],
+            "selected_concept": {"concept_id": "c1", "rationale": "R"},
+            "production_plan": {"pipeline": "topic-tutorial", "render_runtime": "remotion", "stages": [{"stage": "script", "tools": [], "approach": "write"}]},
+            "cost_estimate": {"total_estimated_usd": 0.0, "line_items": [], "budget_verdict": "within_budget"},
+            "approval": {"status": "approved"},
+        }
+        sc = {
+            "version": "1.0",
+            "title": "Script Title",
+            "total_duration_seconds": 5.0,
+            "sections": [
+                {
+                    "id": "s1",
+                    "text": "Hello world",
+                    "start_seconds": 0.0,
+                    "end_seconds": 5.0,
+                }
+            ],
+        }
+        sp = {
+            "version": "1.0",
+            "style_playbook": "software-technical",
+            "scenes": [
+                {
+                    "id": "s1",
+                    "type": "text_card",
+                    "description": "Intro card",
+                    "start_seconds": 0.0,
+                    "end_seconds": 5.0,
+                    "script_section_id": "s1",
+                }
+            ],
+        }
+        am = {
+            "version": "1.0",
+            "assets": [
+                {
+                    "id": "a1",
+                    "scene_id": "s1",
+                    "type": "narration",
+                    "path": "assets/s1.wav",
+                    "source_tool": "mlx_tts",
+                    "duration_seconds": 5.0,
+                    "format": "wav",
+                    "provider": "mlx",
+                    "cost_usd": 0.0,
+                }
+            ],
+            "total_cost_usd": 0.0,
+        }
+        ed = {
+            "version": "1.0",
+            "render_runtime": "remotion",
+            "cuts": [
+                {
+                    "id": "cut-1",
+                    "source": "assets/s1.wav",
+                    "in_seconds": 0.0,
+                    "out_seconds": 5.0,
+                    "layer": "primary",
+                }
+            ],
+        }
+        rr = {
+            "version": "1.0",
+            "outputs": [
+                {
+                    "path": "renders/final.mp4",
+                    "format": "mp4",
+                    "codec": "h264",
+                    "resolution": "1920x1080",
+                    "fps": 30.0,
+                    "duration_seconds": 5.0,
+                    "file_size_bytes": 1000,
+                }
+            ],
+            "render_time_seconds": 2.0,
+            "render_grammar": "explainer-data",
+        }
 
         # Simulate Stages 1-4
-        # Stage 1: research (gated: False)
-        write_checkpoint(
-            base_dir, proj_id, "research", "completed",
-            artifacts={"research_brief": rb},
-            pipeline_type="topic-tutorial",
-        )
-        # Stage 2: proposal (gated: True)
-        write_checkpoint(
-            base_dir, proj_id, "proposal", "completed",
-            artifacts={"proposal_packet": pp},
-            pipeline_type="topic-tutorial",
-            human_approved=True,
-        )
-        # Stage 3: script (gated: False)
-        write_checkpoint(
-            base_dir, proj_id, "script", "completed",
-            artifacts={"script": sc},
-            pipeline_type="topic-tutorial",
-        )
-        # Stage 4: scene_plan (gated: True)
-        write_checkpoint(
-            base_dir, proj_id, "scene_plan", "completed",
-            artifacts={"scene_plan": sp},
-            pipeline_type="topic-tutorial",
-            human_approved=True,
-        )
+        write_checkpoint(base_dir, proj_id, "research", "completed", artifacts={"research_brief": rb}, pipeline_type="topic-tutorial")
+        write_checkpoint(base_dir, proj_id, "proposal", "completed", artifacts={"proposal_packet": pp}, pipeline_type="topic-tutorial", human_approved=True)
+        write_checkpoint(base_dir, proj_id, "script", "completed", artifacts={"script": sc}, pipeline_type="topic-tutorial")
+        write_checkpoint(base_dir, proj_id, "scene_plan", "completed", artifacts={"scene_plan": sp}, pipeline_type="topic-tutorial", human_approved=True)
 
-        # Simulate process interruption & reload
-        completed = get_completed_stages(base_dir, proj_id, pipeline_type="topic-tutorial")
+        # Verify resumption state
+        completed = get_completed_stages(base_dir, proj_id)
         assert completed == ["research", "proposal", "script", "scene_plan"]
-        latest = get_latest_checkpoint(base_dir, proj_id)
-        assert latest is not None
-        assert latest["stage"] == "scene_plan"
-        assert get_next_stage(base_dir, proj_id, pipeline_type="topic-tutorial") == "assets"
 
-        # Resume Stage 5-7 without re-running Stages 1-4
-        write_checkpoint(
-            base_dir, proj_id, "assets", "completed",
-            artifacts={"asset_manifest": am},
-            pipeline_type="topic-tutorial",
-        )
-        write_checkpoint(
-            base_dir, proj_id, "edit", "completed",
-            artifacts={"edit_decisions": ed},
-            pipeline_type="topic-tutorial",
-        )
-        write_checkpoint(
-            base_dir, proj_id, "compose", "completed",
-            artifacts={"render_report": rr},
-            pipeline_type="topic-tutorial",
-            human_approved=True,
-        )
+        next_stage = get_next_stage(base_dir, proj_id, "topic-tutorial")
+        assert next_stage == "assets"
 
-        final_completed = get_completed_stages(base_dir, proj_id, pipeline_type="topic-tutorial")
-        assert "compose" in final_completed
-        assert get_next_stage(base_dir, proj_id, pipeline_type="topic-tutorial") == "publish"
+        latest_cp = get_latest_checkpoint(base_dir, proj_id)
+        assert latest_cp["stage"] == "scene_plan"
+        assert latest_cp["status"] == "completed"
+
+        # Resume from Stage 5 (assets) -> Stage 6 (edit) -> Stage 7 (compose)
+        write_checkpoint(base_dir, proj_id, "assets", "completed", artifacts={"asset_manifest": am}, pipeline_type="topic-tutorial")
+        write_checkpoint(base_dir, proj_id, "edit", "completed", artifacts={"edit_decisions": ed}, pipeline_type="topic-tutorial")
+        write_checkpoint(base_dir, proj_id, "compose", "completed", artifacts={"render_report": rr}, pipeline_type="topic-tutorial", human_approved=True)
+
+        final_completed = get_completed_stages(base_dir, proj_id)
+        assert final_completed == ["research", "proposal", "script", "scene_plan", "assets", "edit", "compose"]

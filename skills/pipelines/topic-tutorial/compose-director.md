@@ -19,3 +19,4 @@ You are the **Compose Director** for the `topic-tutorial` pipeline. You render t
 3. Render master video at 1080p@30fps (or opt-in 4K profile).
 4. Verify output video with `ffprobe` (codec: h264, resolution: 1920x1080, fps: 30, audio: aac).
 5. Save `artifacts/render_report.json`.
+6. **Quality Assurance Audit:** Follow `skills/pipelines/topic-tutorial/review-director.md` to validate loudness (-14 LUFS), stream sync, and black/frozen frames before completing the stage.

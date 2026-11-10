@@ -678,7 +678,8 @@ def run_phase2():
     
     out_duration = float(p_info["format"]["duration"])
     out_size = int(p_info["format"]["size"])
-    out_fps = float(eval(v_stream["r_frame_rate"]))
+    from fractions import Fraction
+    out_fps = float(Fraction(v_stream["r_frame_rate"]))
     out_res = f"{v_stream['width']}x{v_stream['height']}"
 
     print(f"  [QA] Measured Duration: {out_duration}s (Target: 60-90s)")

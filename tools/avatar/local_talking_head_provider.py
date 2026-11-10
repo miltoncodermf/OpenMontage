@@ -93,8 +93,10 @@ class LocalTalkingHeadProvider(BaseTool):
     ]
 
     def get_status(self) -> ToolStatus:
-        """Always available as a pipeline-safe degradation adapter."""
-        return ToolStatus.AVAILABLE
+        """Return AVAILABLE if CUDA SadTalker is configured, else DEGRADED (visual fallback mode)."""
+        if os.environ.get("SADTALKER_PATH") and os.environ.get("CUDA_VISIBLE_DEVICES"):
+            return ToolStatus.AVAILABLE
+        return ToolStatus.DEGRADED
 
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
         return 0.0
@@ -126,6 +128,15 @@ class LocalTalkingHeadProvider(BaseTool):
             except Exception as exc:
                 if not fallback_to_visuals:
                     return ToolResult(success=False, error=f"Avatar generation failed: {exc}")
+
+        if not fallback_to_visuals:
+            return ToolResult(
+                success=False,
+                error=(
+                    "Local talking-head synthesis is infeasible on Apple Silicon M6 without CUDA "
+                    "(see reports/phase4_avatar_feasibility.json) and fallback_to_visuals=False."
+                ),
+            )
 
         # Graceful degradation path documented in Phase 4 benchmark
         elapsed = round(time.time() - started, 2)

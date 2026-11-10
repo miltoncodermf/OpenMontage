@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
+from fractions import Fraction
 from pathlib import Path
 
 # Add project root and venv to PATH
@@ -38,6 +40,7 @@ from styles.playbook_loader import load_playbook
 from tools.audio.mlx_tts_provider import MlxTTSProvider
 from tools.avatar.local_talking_head_provider import LocalTalkingHeadProvider
 from tools.ingestion.universal_ingestor import UniversalIngestor
+from tools.video.video_compose import VideoCompose
 
 
 def run_cmd(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -63,6 +66,14 @@ def file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _extract_loudnorm_json(stderr: str) -> dict:
+    """Extract and parse FFmpeg loudnorm JSON block from stderr, or raise RuntimeError."""
+    matches = list(re.finditer(r"\{\s*\"input_i\"\s*:.*?\}", stderr, re.DOTALL))
+    if not matches:
+        raise RuntimeError(f"Failed to parse FFmpeg loudnorm JSON from stderr: {stderr[-500:]}")
+    return json.loads(matches[-1].group(0))
+
+
 def measure_loudness(audio_path: Path) -> dict:
     """Measure EBU R128 integrated loudness and true peak using ffmpeg loudnorm/ebur128."""
     cmd = [
@@ -71,22 +82,12 @@ def measure_loudness(audio_path: Path) -> dict:
         "-f", "null", "-"
     ]
     res = subprocess.run(cmd, capture_output=True, text=True)
-    # Parse json output from stderr
-    stderr = res.stderr
-    json_start = stderr.find("{\n\t\"input_i\"")
-    if json_start != -1:
-        json_end = stderr.find("}", json_start) + 1
-        raw_json = stderr[json_start:json_end]
-        try:
-            parsed = json.loads(raw_json)
-            return {
-                "integrated_lufs": float(parsed.get("input_i", -14.0)),
-                "true_peak_dbtp": float(parsed.get("input_tp", -1.0)),
-                "lra_lu": float(parsed.get("input_lra", 7.0)),
-            }
-        except Exception:
-            pass
-    return {"integrated_lufs": -14.0, "true_peak_dbtp": -1.0, "lra_lu": 7.0}
+    parsed = _extract_loudnorm_json(res.stderr)
+    return {
+        "integrated_lufs": float(parsed.get("input_i", -14.0)),
+        "true_peak_dbtp": float(parsed.get("input_tp", -1.0)),
+        "lra_lu": float(parsed.get("input_lra", 7.0)),
+    }
 
 
 def master_audio_ebu128(
@@ -104,33 +105,20 @@ def master_audio_ebu128(
         "-f", "null", "-"
     ]
     res1 = subprocess.run(cmd1, capture_output=True, text=True)
-    stderr = res1.stderr
-    json_start = stderr.find("{\n\t\"input_i\"")
-    if json_start != -1:
-        json_end = stderr.find("}", json_start) + 1
-        raw_json = stderr[json_start:json_end]
-        params = json.loads(raw_json)
-        # Pass 2: apply linear normalization with measured parameters
-        cmd2 = [
-            "ffmpeg", "-y", "-i", str(input_wav),
-            "-af", (
-                f"loudnorm=I={target_i}:TP={target_tp}:LRA={target_lra}:"
-                f"measured_I={params['input_i']}:measured_TP={params['input_tp']}:"
-                f"measured_LRA={params['input_lra']}:measured_thresh={params['input_thresh']}:"
-                f"offset={params['target_offset']}:linear=true"
-            ),
-            "-ar", "48000", str(output_wav)
-        ]
-        subprocess.run(cmd2, capture_output=True, text=True, check=True)
-    else:
-        # Fallback single pass
-        cmd2 = [
-            "ffmpeg", "-y", "-i", str(input_wav),
-            "-af", f"loudnorm=I={target_i}:TP={target_tp}:LRA={target_lra}",
-            "-ar", "48000", str(output_wav)
-        ]
-        subprocess.run(cmd2, capture_output=True, text=True, check=True)
+    params = _extract_loudnorm_json(res1.stderr)
 
+    # Pass 2: apply linear normalization with measured parameters
+    cmd2 = [
+        "ffmpeg", "-y", "-i", str(input_wav),
+        "-af", (
+            f"loudnorm=I={target_i}:TP={target_tp}:LRA={target_lra}:"
+            f"measured_I={params['input_i']}:measured_TP={params['input_tp']}:"
+            f"measured_LRA={params['input_lra']}:measured_thresh={params['input_thresh']}:"
+            f"offset={params['target_offset']}:linear=true"
+        ),
+        "-ar", "48000", str(output_wav)
+    ]
+    subprocess.run(cmd2, capture_output=True, text=True, check=True)
     return measure_loudness(output_wav)
 
 
@@ -611,7 +599,15 @@ def main():
         v_info = scene_visuals[sid]
 
         # Content hash check
-        shash = compute_scene_hash(sid, narration_text, v_info["props"], "software-technical")
+        shash = compute_scene_hash(
+            sid,
+            narration_text,
+            v_info["props"],
+            style_name="software-technical",
+            voice="af_heart",
+            speed=1.0,
+            resolution="1920x1080",
+        )
         cached_wav = cache_mgr.get_cached_audio(sid, shash)
 
         if cached_wav and cached_wav.is_file():
@@ -621,6 +617,8 @@ def main():
             dur = cached_meta.get("duration_s")
             sample_rate = cached_meta.get("sample_rate", 24000)
             timestamps = cached_meta.get("timestamps")
+            provider = cached_meta.get("provider", "mlx")
+            model = cached_meta.get("model", "af_heart")
             if dur is None or not timestamps:
                 meta = probe_media(cached_wav)
                 dur = float(meta["format"]["duration"])
@@ -633,6 +631,8 @@ def main():
                 "duration_s": dur,
                 "sample_rate": sample_rate,
                 "timestamps": timestamps,
+                "provider": provider,
+                "model": model,
                 "cached": True,
             })
             scene_audios.append(cached_wav)
@@ -645,10 +645,14 @@ def main():
                 "output_path": str(out_wav)
             })
             assert res.success, f"TTS synthesis failed for scene {sid}: {res.error}"
+            provider = res.data.get("provider", "mlx")
+            model = res.data.get("model", "af_heart")
             cache_mgr.put_cached_audio(sid, shash, out_wav, metadata={
                 "duration_s": res.data["duration_s"],
                 "sample_rate": res.data["sample_rate"],
                 "timestamps": res.data["timestamps"],
+                "provider": provider,
+                "model": model,
             })
             audio_items.append({
                 "scene_id": sid,
@@ -656,9 +660,14 @@ def main():
                 "duration_s": res.data["duration_s"],
                 "sample_rate": res.data["sample_rate"],
                 "timestamps": res.data["timestamps"],
+                "provider": provider,
+                "model": model,
                 "cached": False,
             })
             scene_audios.append(out_wav)
+
+    # Release MLX Metal GPU cache before remotion render
+    tts_tool.release_memory()
 
     # Evaluate presenter beat on s4
     print("  [Avatar Check] Evaluating presenter feasibility on scene s4...")
@@ -669,19 +678,37 @@ def main():
     })
     print(f"  Presenter status: {avatar_res.data['presenter_status']} ({avatar_res.data['fallback_action']})")
 
-    # Stitch master narration audio
+    # Pad each scene audio with 0.6s trailing silence and normalize to 24kHz mono
+    print("  [Audio Conditioning] Padding scene audio with 0.6s trailing silence (-ar 24000 -ac 1)...")
+    padded_scene_audios = []
+    padded_durations = {}
+    for a_item, wav in zip(audio_items, scene_audios):
+        sid = a_item["scene_id"]
+        padded_wav = audio_dir / f"{sid}_padded.wav"
+        run_cmd([
+            "ffmpeg", "-y", "-i", str(wav),
+            "-af", "apad=pad_dur=0.6",
+            "-ar", "24000",
+            "-ac", "1",
+            str(padded_wav)
+        ])
+        padded_scene_audios.append(padded_wav)
+        p_meta = probe_media(padded_wav)
+        padded_durations[sid] = float(p_meta["format"]["duration"])
+
+    # Stitch master narration audio from padded WAVs
     master_wav = audio_dir / "narration_master.wav"
     concat_list = audio_dir / "concat_list.txt"
     with open(concat_list, "w", encoding="utf-8") as f:
-        for wav in scene_audios:
+        for wav in padded_scene_audios:
             f.write(f"file '{wav.resolve()}'\n")
 
     run_cmd(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(master_wav)])
 
-    # Master audio to EBU R128 (-14 LUFS, -1.0 dBTP)
-    print("  [Audio Mastering] Applying Two-Pass EBU R128 normalization (-14 LUFS, -1.0 dBTP)...")
+    # Master audio to EBU R128 (-14 LUFS, -1.0 dBTP ceiling, target_tp=-1.5 for intersample headroom)
+    print("  [Audio Mastering] Applying Two-Pass EBU R128 normalization (-14 LUFS, -1.5 dBTP)...")
     mastered_wav = audio_dir / "narration_mastered_ebu128.wav"
-    loudness_metrics = master_audio_ebu128(master_wav, mastered_wav, target_i=-14.0, target_tp=-1.0)
+    loudness_metrics = master_audio_ebu128(master_wav, mastered_wav, target_i=-14.0, target_tp=-1.5)
     print(f"  Mastered Loudness: {loudness_metrics['integrated_lufs']} LUFS, True Peak: {loudness_metrics['true_peak_dbtp']} dBTP")
 
     asset_manifest = {
@@ -693,11 +720,11 @@ def main():
                 "path": f"assets/audio/{item['scene_id']}.wav",
                 "source_tool": "mlx_tts",
                 "scene_id": f"scene_{item['scene_id']}",
-                "model": "af_heart",
+                "model": item.get("model", "af_heart"),
                 "cost_usd": 0.0,
                 "duration_seconds": item["duration_s"],
                 "format": "wav",
-                "provider": "mlx",
+                "provider": item.get("provider", "mlx"),
                 "quality_score": 0.95
             }
             for item in audio_items
@@ -715,56 +742,60 @@ def main():
 
     # 7. Edit Stage
     print("\n[Stage 6] Edit Decisions & Frame Calculation...")
-    cuts = []
-    current_frame = 0
+    remotion_cuts = []
+    all_captions = []
+    current_time_s = 0.0
     fps = 30.0
 
     for a_item, sc in zip(audio_items, script_data["sections"]):
         sid = a_item["scene_id"]
         v_info = scene_visuals[sid]
-        meta = probe_media(Path(a_item["path"]))
-        dur = float(meta["format"]["duration"])
-        frames = int(round(dur * fps))
+        dur = padded_durations[sid]
+        in_s = round(current_time_s, 2)
+        out_s = round(current_time_s + dur, 2)
 
-        # Format Remotion captions
-        timestamps = a_item.get("timestamps", [])
-        captions = []
-        for ts in timestamps:
-            captions.append({
+        cut = {
+            "id": sid,
+            "type": v_info["cut_type"],
+            "in_seconds": in_s,
+            "out_seconds": out_s,
+            "narrationText": sc["text"],
+            "backgroundColor": "#0F172A",
+            "accentColor": v_info["props"].get("accentColor", palette["accent"][0]),
+            **v_info["props"],
+        }
+        if v_info["cut_type"] == "text_card":
+            cut["text"] = f"{v_info['props']['title']}\n{v_info['props']['subtitle']}"
+
+        remotion_cuts.append(cut)
+
+        offset_ms = int(in_s * 1000)
+        for ts in a_item.get("timestamps", []):
+            all_captions.append({
                 "word": ts["word"],
-                "startMs": ts["startMs"],
-                "endMs": ts["endMs"]
+                "startMs": ts["startMs"] + offset_ms,
+                "endMs": ts["endMs"] + offset_ms,
             })
 
-        cuts.append({
-            "scene_id": sid,
-            "type": v_info["cut_type"],
-            "start_frame": current_frame,
-            "duration_frames": frames,
-            "duration_seconds": dur,
-            "props": {
-                **v_info["props"],
-                "narrationText": sc["text"]
-            },
-            "captions": captions
-        })
-        current_frame += frames
+        current_time_s = out_s
 
-    total_duration_s = round(current_frame / fps, 2)
+    total_duration_s = round(current_time_s, 2)
+    total_frames = int(round(total_duration_s * fps))
+
     edit_decisions = {
         "version": "1.0",
         "render_runtime": "remotion",
         "cuts": [
             {
                 "id": f"cut-{idx+1}",
-                "source": f"assets/audio/{c['scene_id']}.wav",
-                "in_seconds": round(c["start_frame"] / fps, 2),
-                "out_seconds": round((c["start_frame"] + c["duration_frames"]) / fps, 2),
+                "source": f"assets/audio/{c['id']}.wav",
+                "in_seconds": c["in_seconds"],
+                "out_seconds": c["out_seconds"],
                 "layer": "primary",
                 "backgroundColor": "#0F172A",
-                "reason": f"Scene {c['scene_id']} - {c['type']}"
+                "reason": f"Scene {c['id']} - {c['type']}"
             }
-            for idx, c in enumerate(cuts)
+            for idx, c in enumerate(remotion_cuts)
         ]
     }
     with open(artifacts_dir / "edit_decisions.json", "w", encoding="utf-8") as f:
@@ -781,29 +812,18 @@ def main():
     remotion_dir = PROJECT_ROOT / "remotion-composer"
     render_start = time.time()
 
-    # Write runtime composition props
+    # Write runtime composition props conforming to Explainer.tsx contract
     runtime_props = {
-        "title": "Local-First AI Video Pipelines",
-        "theme": {
-            "primaryColor": palette["primary"][0],
-            "accentColor": palette["accent"][0],
-            "backgroundColor": palette["background"],
-            "textColor": palette["text"],
-            "mutedTextColor": palette["muted"],
-            "headingFont": "Inter",
-            "bodyFont": "Inter"
-        },
-        "scenes": [
-            {
-                "id": c["scene_id"],
-                "type": c["type"],
-                "durationFrames": c["duration_frames"],
-                "audioSrc": str(Path(project_dir / "assets" / "audio" / f"{c['scene_id']}.wav").resolve()),
-                "captions": c["captions"],
-                "props": c["props"]
+        "theme": "software-technical",
+        "cuts": remotion_cuts,
+        "captions": all_captions,
+        "audio": {
+            "narration": {
+                "src": str(mastered_wav.resolve()),
+                "volume": 1.0,
             }
-            for c in cuts
-        ]
+        },
+        "tailPaddingSeconds": 0,
     }
     props_json_path = project_dir / "composition_props.json"
     with open(props_json_path, "w", encoding="utf-8") as f:
@@ -811,19 +831,16 @@ def main():
 
     # Render Remotion composition
     final_mp4 = renders_dir / "final_1080p.mp4"
-    remotion_bin = str(remotion_dir / "node_modules" / ".bin" / "remotion")
-    remotion_cmd = [
-        remotion_bin, "render",
-        "src/index.tsx", "Explainer",
-        str(final_mp4),
-        f"--props={str(props_json_path)}",
-        "--gl=angle",
-        "--concurrency=4"
-    ]
-    print(f"  Rendering Remotion: {final_mp4.name} ({current_frame} frames, {total_duration_s}s)...")
-    remotion_res = run_cmd(remotion_cmd, cwd=remotion_dir)
+    print(f"  Rendering Remotion: {final_mp4.name} ({total_frames} frames, {total_duration_s}s)...")
+    res_render = VideoCompose().execute({
+        "operation": "remotion_render",
+        "output_path": str(final_mp4),
+        "composition_data": runtime_props,
+        "remotion_concurrency": 4,
+    })
+    assert res_render.success, f"Remotion render failed: {res_render.error}"
     render_wall_time = round(time.time() - render_start, 2)
-    print(f"  Render completed in {render_wall_time}s ({round(current_frame / render_wall_time, 1)} fps).")
+    print(f"  Render completed in {render_wall_time}s ({round(total_frames / max(render_wall_time, 0.01), 1)} fps).")
 
     # Mux mastered audio into final deliverable
     muxed_mp4 = renders_dir / "master_1080p_mastered.mp4"
@@ -882,127 +899,184 @@ def main():
     print("\n" + "=" * 70)
     print("[Verification] Scene-Level Caching & Incremental Re-render Test")
     print("=" * 70)
-    # Render individual scene clips for caching verification
-    scene_clips = {}
-    for c in cuts:
-        sid = c["scene_id"]
-        clip_path = scene_clips_dir / f"{sid}.mp4"
-        # Render scene clip
+
+    def render_scene_clip_cached(
+        sid: str,
+        cut_item: dict[str, Any],
+        shash: str,
+        audio_file: Path,
+    ) -> tuple[Path, bool]:
+        cached_clip = cache_mgr.get_cached_clip(sid, shash)
+        if cached_clip and cached_clip.is_file():
+            print(f"  [Clip Cache Hit] Reusing cached clip for {sid} (hash={shash})")
+            return cached_clip, True
+
+        print(f"  [Clip Cache Miss] Rendering clip for {sid} (hash={shash})...")
+        clip_path = scene_clips_dir / f"{sid}_{shash}.mp4"
+        dur_s = round(cut_item["out_seconds"] - cut_item["in_seconds"], 2)
+        dur_frames = int(round(dur_s * fps))
+
+        scene_cut = dict(cut_item)
+        scene_cut["in_seconds"] = 0.0
+        scene_cut["out_seconds"] = dur_s
+
+        offset_ms = int(cut_item["in_seconds"] * 1000)
+        scene_captions = [
+            {
+                "word": c["word"],
+                "startMs": c["startMs"] - offset_ms,
+                "endMs": c["endMs"] - offset_ms,
+            }
+            for c in cut_item.get("captions", [])
+        ]
+
         single_props = {
-            "title": f"Scene {sid}",
-            "theme": runtime_props["theme"],
-            "scenes": [
-                {
-                    "id": sid,
-                    "type": c["type"],
-                    "durationFrames": c["duration_frames"],
-                    "audioSrc": str(Path(project_dir / "assets" / "audio" / f"{sid}.wav").resolve()),
-                    "captions": c["captions"],
-                    "props": c["props"]
+            "theme": "software-technical",
+            "cuts": [scene_cut],
+            "captions": scene_captions,
+            "audio": {
+                "narration": {
+                    "src": str(audio_file.resolve()),
+                    "volume": 1.0,
                 }
-            ]
+            },
+            "tailPaddingSeconds": 0,
         }
-        sprops_path = project_dir / f"props_{sid}.json"
-        with open(sprops_path, "w", encoding="utf-8") as f:
-            json.dump(single_props, f)
-        run_cmd([
-            remotion_bin, "render",
-            "src/index.tsx", "Explainer",
-            str(clip_path),
-            f"--props={str(sprops_path)}",
-            "--gl=angle",
-            "--concurrency=2"
-        ], cwd=remotion_dir)
-        scene_clips[sid] = clip_path
+        res_clip = VideoCompose().execute({
+            "operation": "remotion_render",
+            "output_path": str(clip_path),
+            "composition_data": single_props,
+            "remotion_concurrency": 2,
+        })
+        assert res_clip.success, f"Failed to render scene clip {sid}: {res_clip.error}"
 
-    # Record initial modification timestamps
-    initial_mtimes = {sid: clip_path.stat().st_mtime_ns for sid, clip_path in scene_clips.items()}
-    print("  Initial Scene Timestamps recorded for s1, s2, s3, s4, s5.")
+        stored_blob = cache_mgr.put_cached_clip(sid, shash, clip_path)
+        return stored_blob, False
 
-    # Sleep 1.5s to ensure distinct mtime
-    time.sleep(1.5)
+    # Ensure clean clip cache so Pass 1 tests genuine cache population
+    for sid in ["s1", "s2", "s3", "s4", "s5"]:
+        cache_mgr._manifest.pop(f"{sid}:clip", None)
+        for old_clip in cache_mgr.cache_dir.glob(f"{sid}_*_clip.*"):
+            try:
+                old_clip.unlink()
+            except OSError:
+                pass
+    cache_mgr._save_manifest()
+
+    print("  Pass 1: Rendering all 5 scene clips into cache...")
+    pass1_results = {}
+    for c in remotion_cuts:
+        sid = c["id"]
+        v_info = scene_visuals[sid]
+        audio_file = audio_dir / f"{sid}.wav"
+        shash = compute_scene_hash(
+            sid,
+            c["narrationText"],
+            v_info["props"],
+            style_name="software-technical",
+            duration_s=round(c["out_seconds"] - c["in_seconds"], 2),
+            voice="af_heart",
+            speed=1.0,
+            resolution="1920x1080",
+        )
+        clip_p, hit = render_scene_clip_cached(sid, c, shash, audio_file)
+        pass1_results[sid] = (clip_p, hit)
+        assert hit is False, f"Expected cache miss on Pass 1 for {sid}"
 
     # Mutate ONLY Scene 2
     print("  Modifying Scene 2 narration text...")
-    mutated_s2_text = "By unifying 12 CPU cores and 24 gigabytes of memory, local neural models synthesize speech and render graphics effortlessly."
-    out_wav_s2 = audio_dir / "s2.wav"
-    tts_tool.execute({
+    mutated_s2_text = (
+        "By unifying 12 CPU cores and 24 gigabytes of memory, local neural models "
+        "synthesize speech and render graphics effortlessly."
+    )
+    out_wav_s2 = audio_dir / "s2_mutated.wav"
+    mut_res = tts_tool.execute({
         "text": mutated_s2_text,
         "voice": "af_heart",
         "speed": 1.0,
         "output_path": str(out_wav_s2)
     })
+    assert mut_res.success
+    mut_dur = mut_res.data["duration_s"]
 
-    # Re-render ONLY Scene 2 clip
-    print("  Re-rendering ONLY Scene 2 clip...")
-    sprops_s2 = {
-        "title": "Scene s2 Mutated",
-        "theme": runtime_props["theme"],
-        "scenes": [
-            {
-                "id": "s2",
-                "type": cuts[1]["type"],
-                "durationFrames": cuts[1]["duration_frames"],
-                "audioSrc": str(out_wav_s2.resolve()),
-                "captions": cuts[1]["captions"],
-                "props": cuts[1]["props"]
-            }
-        ]
-    }
-    with open(project_dir / "props_s2.json", "w", encoding="utf-8") as f:
-        json.dump(sprops_s2, f)
-    run_cmd([
-        remotion_bin, "render",
-        "src/index.tsx", "Explainer",
-        str(scene_clips["s2"]),
-        f"--props={str(project_dir / 'props_s2.json')}",
-        "--gl=angle",
-        "--concurrency=2"
-    ], cwd=remotion_dir)
+    # Rebuild cut list for Pass 2 with mutated s2
+    pass2_cuts = []
+    for c in remotion_cuts:
+        if c["id"] == "s2":
+            c2 = dict(c)
+            c2["narrationText"] = mutated_s2_text
+            c2["out_seconds"] = round(c2["in_seconds"] + mut_dur, 2)
+            c2["captions"] = mut_res.data["timestamps"]
+            pass2_cuts.append(c2)
+        else:
+            pass2_cuts.append(c)
 
-    # Check timestamps
-    new_mtimes = {sid: clip_path.stat().st_mtime_ns for sid, clip_path in scene_clips.items()}
-    assert new_mtimes["s1"] == initial_mtimes["s1"], "Scene 1 timestamp unexpectedly changed!"
-    assert new_mtimes["s3"] == initial_mtimes["s3"], "Scene 3 timestamp unexpectedly changed!"
-    assert new_mtimes["s4"] == initial_mtimes["s4"], "Scene 4 timestamp unexpectedly changed!"
-    assert new_mtimes["s5"] == initial_mtimes["s5"], "Scene 5 timestamp unexpectedly changed!"
-    assert new_mtimes["s2"] != initial_mtimes["s2"], "Scene 2 timestamp failed to update!"
-    print("  [SUCCESS] Caching test passed: Scenes s1, s3, s4, s5 were preserved untouched; only s2 was regenerated!")
+    print("  Pass 2: Re-evaluating all 5 scene clips (expecting cache hits for s1, s3, s4, s5 and miss for s2)...")
+    pass2_results = {}
+    for c in pass2_cuts:
+        sid = c["id"]
+        v_info = scene_visuals[sid]
+        audio_file = out_wav_s2 if sid == "s2" else audio_dir / f"{sid}.wav"
+        shash = compute_scene_hash(
+            sid,
+            c["narrationText"],
+            v_info["props"],
+            style_name="software-technical",
+            duration_s=round(c["out_seconds"] - c["in_seconds"], 2),
+            voice="af_heart",
+            speed=1.0,
+            resolution="1920x1080",
+        )
+        clip_p, hit = render_scene_clip_cached(sid, c, shash, audio_file)
+        pass2_results[sid] = (clip_p, hit)
+
+    assert pass2_results["s1"][1] is True, "Scene 1 should be a cache hit!"
+    assert pass2_results["s3"][1] is True, "Scene 3 should be a cache hit!"
+    assert pass2_results["s4"][1] is True, "Scene 4 should be a cache hit!"
+    assert pass2_results["s5"][1] is True, "Scene 5 should be a cache hit!"
+    assert pass2_results["s2"][1] is False, "Scene 2 should be a cache miss and re-render!"
+    print("  [SUCCESS] Caching test passed: Scenes s1, s3, s4, s5 hit cache; only s2 was regenerated!")
 
     # 10. Opt-in 4K Render Profile Test
     print("\n" + "=" * 70)
     print("[Scaling] Opt-In 4K Profile Benchmark (3840x2160 @ 30fps)")
     print("=" * 70)
     test_4k_mp4 = renders_dir / "benchmark_4k_test.mp4"
+    remotion_bin = str((remotion_dir / "node_modules" / ".bin" / "remotion").resolve())
     props_4k = {
-        "title": "4K Scaling Test",
-        "theme": runtime_props["theme"],
-        "scenes": [
+        "theme": "software-technical",
+        "cuts": [
             {
                 "id": "s1_4k",
                 "type": "text_card",
-                "durationFrames": 90,  # 3 seconds
-                "audioSrc": str((audio_dir / "s1.wav").resolve()),
-                "captions": cuts[0]["captions"][:3],
-                "props": {
-                    "title": "4K Ultra-HD Scaling",
-                    "subtitle": "3840x2160 @ 30fps M6 Apple Silicon Test",
-                    "accentColor": palette["accent"][0]
-                }
+                "in_seconds": 0.0,
+                "out_seconds": 5.0,
+                "text": "4K Ultra-HD Scaling\n3840x2160 @ 30fps M6 Apple Silicon Test",
+                "title": "4K Ultra-HD Scaling",
+                "subtitle": "3840x2160 @ 30fps M6 Apple Silicon Test",
+                "accentColor": palette["accent"][0],
+                "backgroundColor": "#0F172A",
             }
-        ]
+        ],
+        "captions": [
+            {"word": "4K", "startMs": 0, "endMs": 1000},
+            {"word": "Ultra-HD", "startMs": 1000, "endMs": 2500},
+            {"word": "Scaling", "startMs": 2500, "endMs": 4800},
+        ],
+        "tailPaddingSeconds": 0,
     }
     props_4k_path = project_dir / "props_4k.json"
     with open(props_4k_path, "w", encoding="utf-8") as f:
-        json.dump(props_4k, f)
+        json.dump(props_4k, f, indent=2)
 
     start_4k = time.time()
-    print("  Rendering 4K Remotion clip...")
+    print("  Rendering 4K Remotion clip (5.0s, frames 0-149)...")
     run_cmd([
         remotion_bin, "render",
         "src/index.tsx", "Explainer",
         str(test_4k_mp4),
         f"--props={str(props_4k_path)}",
+        "--frames=0-149",
         "--width=3840",
         "--height=2160",
         "--gl=angle",
@@ -1012,7 +1086,8 @@ def main():
 
     meta_4k = probe_media(test_4k_mp4)
     v4k = next(s for s in meta_4k["streams"] if s.get("width"))
-    print(f"  [4K Render Success] Resolution: {v4k['width']}x{v4k['height']}, Time: {elapsed_4k}s ({round(90 / elapsed_4k, 1)} fps).")
+    assert abs(float(meta_4k["format"]["duration"]) - 5.0) < 0.5, f"4K benchmark duration was {meta_4k['format']['duration']}, expected ~5.0s"
+    print(f"  [4K Render Success] Resolution: {v4k['width']}x{v4k['height']}, Duration: {meta_4k['format']['duration']}s, Time: {elapsed_4k}s ({round(150 / max(elapsed_4k, 0.01), 1)} fps).")
 
     # 11. Final Manifest & QA Report
     print("\n" + "=" * 70)
@@ -1036,7 +1111,7 @@ def main():
             "master_1080p": {
                 "file_path": str(muxed_mp4),
                 "resolution": f"{vstream['width']}x{vstream['height']}",
-                "fps": round(eval(vstream["r_frame_rate"]), 1),
+                "fps": round(float(Fraction(vstream["r_frame_rate"])), 1),
                 "duration_seconds": round(float(final_meta["format"]["duration"]), 2),
                 "video_codec": vstream["codec_name"],
                 "audio_codec": astream["codec_name"],
@@ -1064,7 +1139,7 @@ def main():
         },
         "quality_audit": {
             "resolution_verified": vstream['width'] == 1920 and vstream['height'] == 1080,
-            "fps_verified": round(eval(vstream["r_frame_rate"])) == 30,
+            "fps_verified": round(float(Fraction(vstream["r_frame_rate"]))) == 30,
             "loudness_compliant": abs(loudness_metrics["integrated_lufs"] - (-14.0)) <= 1.0,
             "true_peak_compliant": loudness_metrics["true_peak_dbtp"] <= -1.0,
             "black_frames": 0,
