@@ -130,3 +130,44 @@ def test_smoke_pipeline_and_honesty_guard(narration, monkeypatch):
     good = vc._run_final_review(video2, compiled2["_ed"], asset_manifest=assets2)
     assert good["checks"]["honesty_guard"]["test_only_assets"] == []
     assert good["status"] == "pass", good["issues_found"]
+
+
+def test_smoke_sandbox_image_cleanup_real():
+    """Real Apple `container`: build, change a file under sandbox/, build again -> exactly one capture image, no stale containers."""
+    import subprocess
+
+    from lib.sandbox.runtime import AppleContainer, CONTAINER_PREFIX, IMAGE_REPO, current_image_tag
+    from tools.capture.sandbox_capture import SandboxCapture
+
+    rt = AppleContainer()
+    if not rt.is_ready():
+        pytest.skip("Apple `container` is not installed/running")
+    tool = SandboxCapture()
+    readme = REPO / "sandbox" / "README.md"
+    original = readme.read_text(encoding="utf-8")
+    reports = []
+    try:
+        first = tool.execute({"operation": "build_image", "runtime": "apple_container"})
+        assert first.success, first.error
+        reports.append(("build 1", first.data))
+        # a stopped, orphaned capture container (no --rm, like one left behind by a crashed run) must be swept by the next build
+        subprocess.run(["container", "run", "-d", "--name", "om-capture-smoke-stale-1", "--entrypoint", "/bin/true", first.data["image"]], capture_output=True, text=True, check=True)
+        assert any(c["name"] == "om-capture-smoke-stale-1" for c in rt.list_capture_containers())
+        readme.write_text(original + "\n<!-- smoke: content-hash change -->\n", encoding="utf-8")
+        second = tool.execute({"operation": "build_image", "runtime": "apple_container"})
+        assert second.success and second.data["rebuilt"] is True, second.error
+        assert second.data["image"] != first.data["image"]
+        reports.append(("build 2", second.data))
+        images = [r for r in rt.parse_images(subprocess.run(["container", "image", "list", "--format", "json"], capture_output=True, text=True).stdout)
+                  if r.rsplit("/", 1)[-1].partition(":")[0] == IMAGE_REPO]
+        assert len(images) == 1 and images[0].endswith(current_image_tag().split(":")[1]), images
+        assert not [c for c in rt.list_capture_containers() if c["name"].startswith(CONTAINER_PREFIX)]
+        assert any(first.data["image"].split(":")[1] in r for r in second.data["cleanup"]["images_removed"])
+        assert "om-capture-smoke-stale-1" in second.data["cleanup"]["containers_removed"]
+        assert second.data["cleanup"]["errors"] == []
+    finally:
+        readme.write_text(original, encoding="utf-8")
+        subprocess.run(["container", "rm", "--force", "om-capture-smoke-stale-1"], capture_output=True, text=True)
+        tool.execute({"operation": "build_image", "runtime": "apple_container"})  # leave exactly the image that matches the restored sandbox/
+        for label, data in reports:
+            print(f"\n[{label}] {data['image']} rebuilt={data.get('rebuilt')} cleanup={data.get('cleanup')}")

@@ -19,7 +19,7 @@ from typing import Any, Optional
 
 from lib.heavy_lock import DEFAULT_RENDER_WAIT_S, HeavyJobBusy, heavy_job
 from lib.sandbox.capture_script import needs_owner_login, validate_capture_script
-from lib.sandbox.runtime import IMAGE_TAG, ContainerRuntime, Mount, RunSpec, detect_runtime
+from lib.sandbox.runtime import ContainerRuntime, Mount, RunSpec, cleanup_stale, current_image_tag, detect_runtime
 from lib.sandbox.workspace import prepare_workspace
 from tools.base_tool import (
     BaseTool,
@@ -107,8 +107,8 @@ class SandboxCapture(BaseTool):
     install_instructions = (
         "Install Apple `container` (macOS 26+, Apple Silicon): download the signed .pkg from "
         "https://github.com/apple/container/releases, install it, then run `container system start`. "
-        "Build the capture image once: operation `build_image` (or `container build -t openmontage-capture:1 "
-        "-f sandbox/Dockerfile sandbox`). Colima or Docker also work as OCI runtimes."
+        "Build the capture image: operation `build_image` (tags it openmontage-capture:<hash of sandbox/>, then removes every older "
+        "capture image and stale om-capture-* container). Colima or Docker also work as OCI runtimes."
     )
 
     capabilities = ["sandboxed_screen_recording", "code_server_capture", "browser_capture", "terminal_capture", "owner_login_pause"]
@@ -125,7 +125,7 @@ class SandboxCapture(BaseTool):
     input_schema = {
         "type": "object",
         "properties": {
-            "operation": {"type": "string", "enum": ["run", "build_image", "start", "status", "confirm_login", "collect"], "default": "run"},
+            "operation": {"type": "string", "enum": ["run", "build_image", "start", "status", "confirm_login", "collect", "cleanup"], "default": "run"},
             "project_dir": {"type": "string", "description": "projects/<id> directory; outputs go to assets/captures/<capture_id>/"},
             "workspace": {"type": "string", "description": "Source directory to COPY into the sandbox (never mounted directly)"},
             "focus": {"type": "array", "items": {"type": "string"}, "description": "Sub-paths of workspace to include"},
@@ -175,6 +175,8 @@ class SandboxCapture(BaseTool):
         try:
             if op == "build_image":
                 return self._build_image(rt)
+            if op == "cleanup":
+                return ToolResult(success=True, data={"cleanup": self._cleanup(rt)})
             if op == "run":
                 res = self._start(rt, inputs, blocking=True)
             elif op == "start":
@@ -193,12 +195,21 @@ class SandboxCapture(BaseTool):
         return res
 
     # ---- operations ---------------------------------------------------------
+    def _cleanup(self, rt: ContainerRuntime, active_name: str | None = None) -> dict[str, Any]:
+        """Best-effort cleanup; a failure here must never fail the build/capture that triggered it."""
+        try:
+            return cleanup_stale(rt, current_image_tag(), active_name=active_name)
+        except Exception as exc:  # noqa: BLE001
+            return {"errors": [f"cleanup failed: {type(exc).__name__}: {exc}"]}
+
     def _build_image(self, rt: ContainerRuntime) -> ToolResult:
-        proc = subprocess.run(rt.build_argv(IMAGE_TAG, str(SANDBOX_DIR), str(SANDBOX_DIR / "Dockerfile")),
-                              capture_output=True, text=True)
-        if proc.returncode != 0:
+        tag = current_image_tag()
+        if rt.image_exists(tag):
+            return ToolResult(success=True, data={"image": tag, "runtime": rt.name, "rebuilt": False, "cleanup": self._cleanup(rt)})
+        proc = subprocess.run(rt.build_argv(tag, str(SANDBOX_DIR), str(SANDBOX_DIR / "Dockerfile")), capture_output=True, text=True)
+        if proc.returncode != 0:  # never clean up after a failed build: the old image is still the only one that works
             return ToolResult(success=False, error=f"image build failed: {proc.stderr[-2000:]}")
-        return ToolResult(success=True, data={"image": IMAGE_TAG, "runtime": rt.name})
+        return ToolResult(success=True, data={"image": tag, "runtime": rt.name, "rebuilt": True, "cleanup": self._cleanup(rt)})
 
     def _paths(self, project_dir: Path, capture_id: str) -> dict[str, Path]:
         scratch = project_dir / ".sandbox" / capture_id
@@ -217,8 +228,10 @@ class SandboxCapture(BaseTool):
             return ToolResult(success=False, error="script has await_owner_login: use operation start → confirm_login → collect")
         if not inputs.get("project_dir"):
             return ToolResult(success=False, error="project_dir is required (outputs go under projects/<id>/assets/captures/)")
-        if not rt.image_exists():
-            return ToolResult(success=False, error=f"capture image {IMAGE_TAG} not built. Run operation build_image first.")
+        image = current_image_tag()
+        if not rt.image_exists(image):
+            return ToolResult(success=False, error=f"capture image {image} not built (sandbox/ changed or never built). Run operation build_image first.")
+        cleanup = self._cleanup(rt)  # sweep leftovers from crashed runs before creating the new container
         project_dir = Path(inputs["project_dir"]).resolve()
         cid = script["capture_id"]
         paths = self._paths(project_dir, cid)
@@ -236,7 +249,7 @@ class SandboxCapture(BaseTool):
         name = f"om-capture-{cid}-{int(time.time())}"
         allow = script.get("allow_domains", [])
         spec = RunSpec(
-            image=IMAGE_TAG, name=name, cpus=int(inputs.get("cpus", 4)), memory=str(inputs.get("memory", "4G")),
+            image=image, name=name, cpus=int(inputs.get("cpus", 4)), memory=str(inputs.get("memory", "4G")),
             mounts=[Mount(str(paths["workspace"]), "/workspace"), Mount(str(paths["out"]), "/out")],
             env={"ALLOW_DOMAINS": ",".join(allow), "RESOLUTION": inputs.get("resolution", "1920x1080"),
                  "FPS": str(inputs.get("fps", 30)), "MAX_DURATION_S": str(max_s), "OWNER_LOGIN": "1" if login else "0"},
@@ -255,7 +268,7 @@ class SandboxCapture(BaseTool):
                 rt.teardown(name)
                 return ToolResult(success=False, error=f"container failed to start: {proc.stderr[-1500:]}")
             return ToolResult(success=True, data={
-                "capture_id": cid, "status": "started", "container": name,
+                "capture_id": cid, "status": "started", "container": name, "cleanup": cleanup,
                 "novnc_url": f"http://127.0.0.1:{NOVNC_PORT}/vnc.html?autoconnect=1&resize=scale" if login else None,
                 "next": "status → confirm_login (after the owner has logged in himself) → collect",
             })
@@ -267,7 +280,10 @@ class SandboxCapture(BaseTool):
                 pass  # result.json absent -> reported as timeout below
             finally:
                 rt.teardown(name)
-        return self._finish(project_dir, cid)
+        res = self._finish(project_dir, cid)
+        if isinstance(res.data, dict):
+            res.data["cleanup"] = cleanup
+        return res
 
     def _load_state(self, inputs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Path]] | None:
         cid, pd = inputs.get("capture_id"), inputs.get("project_dir")

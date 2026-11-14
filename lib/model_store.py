@@ -1,4 +1,4 @@
-"""Where local model weights live (kept off the internal drive when an external volume is configured).
+"""Where local model weights live (``~/.openmontage/models`` by default; point it elsewhere with the env var or the pointer file).
 
 Resolution order: ``OPENMONTAGE_MODELS_DIR`` env → the path stored in ``~/.openmontage/models_dir``
 (a one-line file outside the repo) → ``~/.openmontage/models``. Private presenter profiles never live here.

@@ -1251,7 +1251,7 @@ class TestV3SandboxToolAndLock:
             def is_ready(self):
                 return True
 
-            def image_exists(self, tag=rtmod.IMAGE_TAG):
+            def image_exists(self, tag=None):
                 return True
 
         tool = SandboxCapture()
@@ -2379,3 +2379,190 @@ class TestFixRound1EngineHelpers:
 
         monkeypatch.setenv("OPENMONTAGE_MODELS_DIR", str(tmp_path / "m"))
         assert model_store.models_dir() == tmp_path / "m" and model_store.model_path("a", "b") == tmp_path / "m" / "a" / "b"
+
+
+# ---------------------------------------------------------------------------
+# Sandbox image/container cleanup (docs/sandbox-image-cleanup.md) — subprocess mocked
+# ---------------------------------------------------------------------------
+
+
+class _FakeCLI:
+    """Records every argv and answers list/inspect/build like Apple `container` would (JSON output)."""
+
+    def __init__(self, images=(), containers=(), build_ok=True, fail_on=None):
+        self.images = list(images)
+        self.containers = [dict(c) for c in containers]
+        self.build_ok = build_ok
+        self.fail_on = fail_on
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kw):
+        import json
+        import subprocess
+
+        self.calls.append(list(argv))
+        a = argv[1:]
+        out, rc = "", 0
+        if a[:2] == ["image", "list"]:
+            out = json.dumps([{"configuration": {"name": r if "/" in r else f"docker.io/library/{r}"}, "id": "sha256:" + "0" * 12, "variants": []} for r in self.images])
+        elif a[:1] == ["list"]:
+            out = json.dumps([{"id": c["name"], "status": {"state": c["state"], "networks": []}, "configuration": {"id": c["name"], "image": {"reference": c.get("image", "x")}}} for c in self.containers])
+        elif a[:2] == ["image", "inspect"]:
+            rc = 0 if any(self._norm(i) == self._norm(a[2]) for i in self.images) else 1
+        elif a[:2] == ["image", "delete"]:
+            if self.fail_on == "delete":
+                raise RuntimeError("boom")
+            self.images = [i for i in self.images if self._norm(i) != self._norm(a[2])]
+        elif a[:1] == ["build"]:
+            rc = 0 if self.build_ok else 1
+            if self.build_ok:
+                self.images.append(a[a.index("-t") + 1])
+        elif a[:1] == ["rm"]:
+            self.containers = [c for c in self.containers if c["name"] != a[-1]]
+        return subprocess.CompletedProcess(argv, rc, stdout=out, stderr="" if rc == 0 else "build failed")
+
+    @staticmethod
+    def _norm(ref):
+        return ref if "/" in ref else f"docker.io/library/{ref}"  # Apple lists local images with this prefix
+
+    def removed(self):
+        return [c[-1].rsplit("/", 1)[-1] for c in self.calls if c[1:3] == ["image", "delete"]]
+
+
+def _apple(fake):
+    from lib.sandbox.runtime import AppleContainer
+
+    return AppleContainer(which=lambda b: "/usr/local/bin/container", runner=fake)
+
+
+class TestSandboxCleanup:
+    def _tool(self, rt, monkeypatch):
+        from tools.capture import sandbox_capture as sc
+
+        tool = sc.SandboxCapture()
+        monkeypatch.setattr(tool, "_runtime", lambda preferred=None: rt)
+        monkeypatch.setattr(sc.subprocess, "run", rt._run)  # the build subprocess goes through the same fake
+        return tool
+
+    def test_content_hash_stable_and_changes_with_any_file(self, tmp_path):
+        from lib.sandbox.runtime import sandbox_hash
+
+        d = tmp_path / "sb"
+        (d / "sub").mkdir(parents=True)
+        (d / "Dockerfile").write_text("FROM x")
+        (d / "sub" / "a.sh").write_text("echo 1")
+        h1 = sandbox_hash(d)
+        assert h1 == sandbox_hash(d) and len(h1) == 12 and int(h1, 16) >= 0
+        (d / "sub" / "a.sh").write_text("echo 2")
+        h2 = sandbox_hash(d)
+        assert h2 != h1
+        (d / "new.txt").write_text("")
+        assert sandbox_hash(d) not in (h1, h2)
+        (d / "__pycache__").mkdir()
+        (d / "__pycache__" / "x.pyc").write_text("junk")
+        assert sandbox_hash(d) == sandbox_hash(d)  # caches are ignored (same as before adding)
+        (d / "__pycache__" / "x.pyc").write_text("other junk")
+        h3 = sandbox_hash(d)
+        (d / "__pycache__" / "x.pyc").unlink()
+        assert sandbox_hash(d) == h3
+
+    def test_build_labels_image_for_both_runtimes(self):
+        from lib.sandbox.runtime import Docker, ROLE_LABEL
+
+        for rt in (_apple(_FakeCLI()), Docker()):
+            argv = rt.build_argv("openmontage-capture:abc", "ctx", "ctx/Dockerfile")
+            assert argv[argv.index("--label") + 1] == ROLE_LABEL
+
+    def test_build_removes_old_tags_and_legacy_but_not_new_or_foreign(self, monkeypatch):
+        from lib.sandbox.runtime import current_image_tag
+
+        new = current_image_tag()
+        fake = _FakeCLI(images=["openmontage-capture:1", "openmontage-capture:deadbeef0000", "docker.io/library/ubuntu:24.04", "postgres:16"])
+        tool = self._tool(_apple(fake), monkeypatch)
+        res = tool.execute({"operation": "build_image"})
+        assert res.success and res.data["rebuilt"] is True and res.data["image"] == new
+        assert sorted(fake.removed()) == ["openmontage-capture:1", "openmontage-capture:deadbeef0000"]
+        norm = [_FakeCLI._norm(i) for i in fake.images]
+        assert _FakeCLI._norm(new) in norm and "docker.io/library/ubuntu:24.04" in norm and "docker.io/library/postgres:16" in norm
+        assert sorted(r.rsplit("/", 1)[-1] for r in res.data["cleanup"]["images_removed"]) == sorted(fake.removed())
+        assert ["container", "builder", "stop"] in fake.calls and ["container", "image", "prune"] in fake.calls
+
+    def test_current_image_short_circuits_and_still_cleans(self, monkeypatch):
+        from lib.sandbox.runtime import current_image_tag
+
+        fake = _FakeCLI(images=[current_image_tag(), "openmontage-capture:1"])
+        res = self._tool(_apple(fake), monkeypatch).execute({"operation": "build_image"})
+        assert res.success and res.data["rebuilt"] is False and not any(c[1] == "build" for c in fake.calls)
+        assert fake.removed() == ["openmontage-capture:1"]
+
+    def test_failed_build_triggers_no_removals(self, monkeypatch):
+        fake = _FakeCLI(images=["openmontage-capture:1"], containers=[{"name": "om-capture-x-1", "state": "stopped"}], build_ok=False)
+        res = self._tool(_apple(fake), monkeypatch).execute({"operation": "build_image"})
+        assert res.success is False and "build failed" in res.error
+        assert fake.removed() == [] and not any(c[1] in ("rm", "stop") for c in fake.calls) and any(i.endswith("openmontage-capture:1") for i in fake.images)
+
+    def test_containers_stopped_removed_active_and_inprogress_skipped_foreign_untouched(self):
+        import time
+
+        from lib.sandbox.runtime import cleanup_stale
+
+        now = 2_000_000_000.0
+        fake = _FakeCLI(images=["openmontage-capture:keep"], containers=[
+            {"name": f"om-capture-a-{int(now) - 99999}", "state": "stopped"},
+            {"name": f"om-capture-b-{int(now) - 99999}", "state": "running"},     # old running: orphan from a dead process
+            {"name": f"om-capture-c-{int(now) - 60}", "state": "running"},        # young: possibly a live login handoff
+            {"name": f"om-capture-d-{int(now) - 99999}", "state": "stopped"},     # the active one
+            {"name": "postgres", "state": "running"},
+            {"name": "buildkit", "state": "stopped", "image": "ghcr.io/apple/container-builder-shim/builder:0.13.3"},
+        ])
+        rep = cleanup_stale(_apple(fake), "openmontage-capture:keep", active_name=f"om-capture-d-{int(now) - 99999}", now=now, lock_holder=lambda: None)
+        assert sorted(rep["containers_removed"]) == sorted([f"om-capture-a-{int(now) - 99999}", f"om-capture-b-{int(now) - 99999}"])
+        assert {s["name"] for s in rep["containers_skipped"]} == {f"om-capture-c-{int(now) - 60}", f"om-capture-d-{int(now) - 99999}"}
+        assert not any(("postgres" in c or "buildkit" in c) for c in fake.calls if c[1] in ("stop", "rm"))
+        # a blocking `run` elsewhere (heavy lock held by a sandbox_capture) protects even an old running container
+        fake2 = _FakeCLI(images=["openmontage-capture:keep"], containers=[{"name": f"om-capture-z-{int(now) - 99999}", "state": "running"}])
+        rep2 = cleanup_stale(_apple(fake2), "openmontage-capture:keep", now=now, lock_holder=lambda: {"pid": 1, "label": "sandbox_capture:z"})
+        assert rep2["containers_removed"] == [] and rep2["containers_skipped"][0]["why"] == "possibly in progress"
+
+    def test_never_prunes_all_or_system_and_scope_guard_raises(self, monkeypatch):
+        from lib.sandbox.runtime import Docker, ScopeError, current_image_tag
+
+        fake = _FakeCLI(images=["openmontage-capture:1", current_image_tag()], containers=[{"name": "om-capture-q-1", "state": "stopped"}])
+        self._tool(_apple(fake), monkeypatch).execute({"operation": "cleanup"})
+        for rt in (Docker(), _apple(fake)):
+            for argv in (rt.prune_dangling_argv(), rt.list_images_argv(), rt.list_containers_argv()):
+                flat = " ".join(argv)
+                assert "prune --all" not in flat and "prune -a" not in flat and "system prune" not in flat
+        for argv in fake.calls:
+            flat = " ".join(argv)
+            assert "--all" not in argv[3:] or argv[1:3] == ["image", "list"] or argv[1] == "list"
+            assert "prune -a" not in flat and "system prune" not in flat and "prune --all" not in flat
+        rt = _apple(_FakeCLI())
+        with pytest.raises(ScopeError):
+            rt.remove_image("docker.io/library/ubuntu:24.04")
+        with pytest.raises(ScopeError):
+            rt.teardown("postgres")
+        monkeypatch.setattr(type(rt), "prune_dangling_argv", lambda self: ["container", "image", "prune", "--all"])
+        with pytest.raises(ScopeError):
+            rt.prune_dangling_images()
+
+    def test_cleanup_step_that_raises_does_not_fail_the_build(self, monkeypatch):
+        fake = _FakeCLI(images=["openmontage-capture:1"], fail_on="delete")
+        res = self._tool(_apple(fake), monkeypatch).execute({"operation": "build_image"})
+        assert res.success is True and res.data["rebuilt"] is True
+        assert res.data["cleanup"]["errors"] and res.data["cleanup"]["images_removed"] == []
+
+    def test_old_images_kept_when_current_image_is_missing(self):
+        from lib.sandbox.runtime import cleanup_stale
+
+        fake = _FakeCLI(images=["openmontage-capture:old"])
+        rep = cleanup_stale(_apple(fake), "openmontage-capture:newhash", lock_holder=lambda: None)
+        assert fake.removed() == [] and [r.rsplit("/", 1)[-1] for r in rep["images_skipped"]] == ["openmontage-capture:old"]
+
+    def test_docker_output_parsing(self):
+        from lib.sandbox.runtime import Docker
+
+        d = Docker()
+        assert d.parse_images('{"Repository":"openmontage-capture","Tag":"abc"}\n{"Repository":"<none>","Tag":"<none>"}\n') == ["openmontage-capture:abc"]
+        rows = d.parse_containers('{"Names":"om-capture-x-1","State":"exited","Image":"openmontage-capture:abc"}\n')
+        assert rows == [{"name": "om-capture-x-1", "state": "exited", "image": "openmontage-capture:abc"}]

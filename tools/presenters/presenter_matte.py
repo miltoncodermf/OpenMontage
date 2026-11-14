@@ -44,7 +44,7 @@ def default_segmenter() -> Segmenter:
 def rembg_birefnet_segmenter(model: str | None = None) -> Segmenter:
     from lib.model_store import configure_cache_env
 
-    configure_cache_env()  # rembg weights live in the model store (external drive when configured)
+    configure_cache_env()  # rembg weights live in the model store
     import rembg
 
     session = rembg.new_session(model or twin_backends.BIREFNET_MODEL)

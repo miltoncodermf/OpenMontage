@@ -333,6 +333,8 @@ agent never types passwords.
 
 Existing host-capture tools (`screen_recorder`, `cap_recorder`) are **not** used by topic-tutorial.
 
+**Image/container hygiene (added after the owner's request):** the image is tagged `openmontage-capture:<12-hex sha256 of sandbox/>`; every `build_image` (and every `run`/`start`, and the `cleanup` operation) removes all other `openmontage-capture` images, dangling images, stale `om-capture-*` containers (never one in progress) and stops the Apple builder VM — scoped strictly to our repository/name prefix/role label (see `sandbox/README.md`).
+
 ### 5.8 Narration, alignment, cache
 
 - Narration per section via `mlx_tts` with the locked `voice_profile`; pad + condition as today; two-pass R128 master at compose.
