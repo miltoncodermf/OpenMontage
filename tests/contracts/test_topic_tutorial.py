@@ -49,7 +49,9 @@ class TestTopicTutorialPipelineContract:
         assert _stage_requires_approval("topic-tutorial", "compose") is True
         assert _stage_requires_approval("topic-tutorial", "research") is False
         assert _stage_requires_approval("topic-tutorial", "script") is False
-        assert _stage_requires_approval("topic-tutorial", "assets") is False
+        assert _stage_requires_approval("topic-tutorial", "assets") is True
+        assert _stage_requires_approval("topic-tutorial", "edit") is False
+        assert _stage_requires_approval("topic-tutorial", "publish") is False
 
     def test_subject_style_presets_load(self):
         for style_name in [
@@ -475,7 +477,7 @@ class TestCheckpointResumeSimulation:
         assert latest_cp["status"] == "completed"
 
         # Resume from Stage 5 (assets) -> Stage 6 (edit) -> Stage 7 (compose)
-        write_checkpoint(base_dir, proj_id, "assets", "completed", artifacts={"asset_manifest": am}, pipeline_type="topic-tutorial")
+        write_checkpoint(base_dir, proj_id, "assets", "completed", artifacts={"asset_manifest": am}, pipeline_type="topic-tutorial", human_approved=True)
         write_checkpoint(base_dir, proj_id, "edit", "completed", artifacts={"edit_decisions": ed}, pipeline_type="topic-tutorial")
         write_checkpoint(base_dir, proj_id, "compose", "completed", artifacts={"render_report": rr}, pipeline_type="topic-tutorial", human_approved=True)
 
@@ -844,3 +846,99 @@ class TestVideoComposeQAGovernanceContract:
         assert review["status"] == "fail"
         assert review["checks"]["technical_probe"]["valid_container"] is False
 
+
+
+# ---------------------------------------------------------------------------
+# v3 fast checks (P1): routing, skills-as-deltas, paid-call guard
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+class TestV3RoutingAndSkills:
+    def test_every_manifest_stage_has_a_model_route(self):
+        from lib.model_routing import load_routing, model_for_stage
+
+        routing = load_routing()
+        for stage in get_pipeline_stages("topic-tutorial"):
+            assert model_for_stage(stage, routing)["claude_code"] in {"opus", "sonnet", "haiku"}, stage
+
+    def test_routing_rejects_unknown_tier(self):
+        from lib.model_routing import validate_routing
+
+        with pytest.raises(ValueError):
+            validate_routing({"tiers": {"deep": {}, "standard": {}, "fast": {}}, "stages": {}})
+        with pytest.raises(ValueError):
+            validate_routing({
+                "tiers": {t: {"claude_code": "x", "model_id": "x", "gemini_cli": "x"} for t in ("deep", "standard", "fast")},
+                "stages": {"script": "ultra"},
+            })
+
+    def test_skills_reference_existing_stock_files(self):
+        import re
+
+        skill_dir = REPO_ROOT / "skills" / "pipelines" / "topic-tutorial"
+        manifest = load_pipeline("topic-tutorial")
+        names = {s.split("/")[-1] for s in manifest["required_skills"] if s.startswith("pipelines/topic-tutorial/")}
+        assert len(names) == 11
+        for name in names:
+            text = (skill_dir / f"{name}.md").read_text(encoding="utf-8")
+            first = text.split("**Read first:**", 1)
+            assert len(first) == 2, f"{name}: missing 'Read first:' line"
+            read_first = first[1].split("\n\n", 1)[0]
+            stock = re.findall(r"`(skills/[^`]+\.md)`", read_first)
+            assert stock, f"{name}: Read-first references no stock skill file"
+            for rel in stock:
+                assert (REPO_ROOT / rel).is_file(), f"{name}: {rel} does not exist"
+
+    def test_skills_have_no_v2_presenter_claims(self):
+        skill_dir = REPO_ROOT / "skills" / "pipelines" / "topic-tutorial"
+        for f in skill_dir.glob("*.md"):
+            text = f.read_text(encoding="utf-8")
+            assert "[P0 Default]" not in text and "presenter_fixture" not in text, f.name
+
+    def test_manifest_gates_and_removed_tools(self):
+        manifest = load_pipeline("topic-tutorial")
+        gates = {s["name"]: s["human_approval_default"] for s in manifest["stages"]}
+        assert gates == {
+            "research": False, "proposal": True, "script": False, "scene_plan": True,
+            "assets": True, "edit": False, "compose": True, "publish": False,
+        }
+        banned = {"local_talking_head", "recorded_video", "cap_recorder", "screen_recorder"}
+        for stage in manifest["stages"]:
+            assert not banned & set(stage.get("tools_available", [])), stage["name"]
+            assert not any("kling" in t for t in stage.get("tools_available", []))
+
+
+class TestPaidCallGuard:
+    PACKET = {
+        "approval": {"status": "approved"},
+        "cost_estimate": {
+            "total_est_usd": 2.0,
+            "paid_calls": [{
+                "tool": "gemini_omni_video", "provider": "gemini", "model": "gemini-omni-flash",
+                "purpose": "idle loop", "units": 1, "unit_cost": 2.0, "est_usd": 2.0,
+            }],
+        },
+    }
+
+    def _call(self, packet=None, **kw):
+        from lib.paid_call_guard import check_paid_call
+
+        args = dict(tool="gemini_omni_video", provider="gemini", model="gemini-omni-flash", est_usd=2.0, actual_spent_usd=0.0)
+        args.update(kw)
+        return check_paid_call(packet or self.PACKET, **args)
+
+    def test_listed_call_allowed(self):
+        assert self._call()["allowed"] is True
+
+    def test_unapproved_proposal_blocks(self):
+        packet = {**self.PACKET, "approval": {"status": "pending"}}
+        assert self._call(packet)["allowed"] is False
+
+    def test_unlisted_call_blocks(self):
+        assert self._call(tool="veo_video")["allowed"] is False
+
+    def test_over_120_percent_blocks(self):
+        assert self._call(est_usd=0.3, actual_spent_usd=2.0)["allowed"] is True   # 2.3 <= 2.4
+        assert self._call(est_usd=0.5, actual_spent_usd=2.0)["allowed"] is False  # 2.5 > 2.4

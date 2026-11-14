@@ -1,27 +1,16 @@
-# Script Director — Topic Tutorial Pipeline
+# Script Director — topic-tutorial v3
 
-## When to Use
+**Read first:** `skills/pipelines/explainer/script-director.md` (script structure, timestamps, enhancement cues). Model tier: deep (plus `critic.script` = deep review pass).
 
-You are the **Script Director** for the `topic-tutorial` pipeline. You author the voiceover narration script divided into distinct scenes/beats, with word-count pacing calibrated to target durations.
+## topic-tutorial deltas
 
-## Prerequisites
+- **Pace:** 140–160 WPM (≈ 2.4–2.6 words/s) for 4–8 minutes typical.
+- **Structure:** hook ≤ 15 s → why it matters → steps with proof → recap → CTA. Every step that makes a technical claim has a planned proof (diagram, capture, screenshot).
+- **Fact linking:** every factual claim carries a `fact_id` into `fact_sheet.json`; claims with `untrusted_source: true` must be cross-checked or reworded.
+- **Presenter marks:** mark each section's lines as intended for **presenter full-screen** (hook, section intros, outro) or **voice-over** (everything else — presenter PIP is a scene-director decision). Presenter lines should be conversational and short; the twin lip-syncs them.
+- Write narration for the **locked voice** (`voice_profile`): no unpronounceable tokens; spell out symbols and code identifiers as they should be spoken; avoid literal punctuation the TTS would read aloud.
+- Output `artifacts/script.json` with scene IDs (`s1`, `s2`, …), narration text, estimated durations, presenter marks.
+- Run the `critic.script` pass (deep tier) before checkpointing: pacing, claim sourcing, hook strength.
 
-| Layer | Resource | Purpose |
-|-------|----------|---------|
-| Artifact | `artifacts/proposal_packet.json` | Selected concept & duration target |
-| Schema | `schemas/artifacts/script.schema.json` | Artifact validation |
-
-## Process
-
-1. **Structure Tutorial Beats:**
-   - Hook / Problem statement (10-15s)
-   - Conceptual overview / Architecture (15-20s)
-   - Step-by-step technical walk-through or breakdown (30-45s)
-   - Common pitfalls / Trade-offs (15-20s)
-   - Summary & takeaway (10-15s)
-2. **Pacing Rules:**
-   - 140 to 160 words per minute for clear technical explanations (~2.4 to 2.6 words per second).
-3. **Fact Linking:**
-   - Ensure factual statements correspond to verifiable entries in `fact_sheet.json`.
-4. **Produce Artifact:**
-   - Write `artifacts/script.json` with scene IDs (`s1`, `s2`, ...), narration text, and estimated durations.
+## Review focus / success criteria
+Mirror the manifest: logical flow, 140–160 WPM, claims linked to sources, every scene has narration and an estimated duration.

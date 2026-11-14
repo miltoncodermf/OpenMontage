@@ -20,3 +20,16 @@ Acceptance:
 - `grep -rn presenter_fixture tools lib skills pipeline_defs` → no matches.
 - `.venv/bin/pytest tests/contracts/test_topic_tutorial.py -q` → 31 passed.
 - `.venv/bin/pytest tests/contracts -q` → 1573 passed, 9 skipped.
+
+## Phase 1 — Skills, routing, gates
+
+Done:
+- `config/topic-tutorial/model_routing.yaml` (deep/standard/fast tiers, per-stage routing, onboarding routes) + `lib/model_routing.py` loader/validator. Gemini CLI model names are placeholders (not verified against an installed Gemini CLI — not run).
+- 11 director skills in `skills/pipelines/topic-tutorial/` rewritten as deltas on stock skills (each starts with a `**Read first:**` line pointing at existing `explainer/`, `screen-demo/` or `avatar-spokesperson/` files). `executive-producer` now defines the per-stage sub-agent protocol, presenter rule, cost rule, decision-log categories.
+- Manifest: version 3.0; gates proposal/scene_plan/assets/compose = true, all other stages false; success criteria no longer claim $0.00.
+- `proposal_packet.cost_estimate` gains `paid_calls[]` + `total_est_usd`; `lib/paid_call_guard.py` enforces "listed + approved + ≤ 1.2× total".
+
+Acceptance:
+- Manifest validates (`load_pipeline("topic-tutorial")` → version 3.0).
+- Routing coverage test, skills-reference-existing-stock-files test, gates test, paid-call guard tests → in `tests/contracts/test_topic_tutorial.py` (40 passed).
+- `.venv/bin/pytest tests/contracts -q` → 1584 passed, 9 skipped.

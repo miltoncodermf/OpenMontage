@@ -1,28 +1,17 @@
-# Asset Director — Topic Tutorial Pipeline
+# Asset Director — topic-tutorial v3  🛑 gate
 
-## When to Use
+**Read first:** `skills/pipelines/explainer/asset-director.md` and `skills/pipelines/screen-demo/asset-director.md`; for the presenter work also `skills/pipelines/topic-tutorial/presenter-director.md`. Model tier: standard (this stage includes driving sandbox captures). Read each tool's Layer 3 `agent_skills` before calling it.
 
-You are the **Asset Director** for the `topic-tutorial` pipeline. You execute the generation and validation of all audio and visual assets required by the Scene Plan, compiling the canonical `asset_manifest.json`.
+## topic-tutorial deltas
 
-## Tools Available
+1. **Narration:** `mlx_tts` with the **locked `voice_profile`** (deterministic for a given text). Pad and condition as before; two-pass R128 mastering happens at compose.
+2. **Alignment (D22):** call `transcriber` (whisperX forced alignment against the **known script text**), keep word timings, map recognized words back to script tokens (numbers, punctuation). On low confidence or tool unavailable, fall back to `alignment_provider` and set `alignment_method: "heuristic"` in the manifest — surfaced at the gate. Log `alignment_method`.
+3. **Twin generation** — see `presenter-director.md`. On unrecoverable failure → no-presenter fallback (`presenter_status: "skipped_failed"` + reason), never a fixture.
+4. **Captures:** run each beat's capture script with `sandbox_capture` only (never `screen_recorder`/`cap_recorder`, never the owner's desktop). Never run captures concurrently with lip-sync or Remotion renders (24 GB). Keep the recording, step screenshots and the step log.
+5. **Other visuals:** diagrams (`diagram_gen`), screenshots, sourced media — each `sourced_*` asset records `rights_status`, `license`, `source_url`, `attribution`, `retrieved_at`.
+6. **Cost:** itemized paid calls only; run `lib/paid_call_guard.check_paid_call` first; track actuals with `tools/cost_tracker.py`.
+7. **Manifest:** every asset with SHA-256, provenance (tool, provider, model/version, seed), cost, scene linkage; presenter assets carry `identity_transform: "beautified"` and `profile_id`. Write `partial_progress` in the checkpoint after each unit so long runs resume.
+8. **QA before the gate:** ffprobe all media; no `TEST_ONLY_`/fixture asset anywhere; presenter QA results (§5.5 step 5) summarized. Present assets scene-by-scene, then **end your turn**.
 
-| Capability | Tool | Purpose |
-|------------|------|---------|
-| TTS Narration | `mlx_tts` (with `piper_tts` fallback) | Local neural speech synthesis on Apple Silicon |
-| Acoustic Alignment | `alignment_provider` | VAD speech energy envelope & word-level forced alignment |
-| Recorded Presenter | `recorded_video` | Validates and ingests user-recorded webcam/phone footage |
-| Avatar Import | `gemini_personal_avatar_import` | Ingests official Gemini Apps personal avatar exports |
-| Flow B-roll Import | `google_flow_import` | Ingests user-exported Google Flow video clips |
-| Cloud B-roll | `gemini_omni_video` | Opt-in API short b-roll generation with strict cost guards |
-| Diagrams | `diagram_gen` | Structured vector diagram generation |
-| Screenshots | `screenshot_import` | Ingests and bounds-checks UI screenshots |
-| Screen Recordings | `screen_recording_import` | Probes and validates application screen recordings |
-
-## Process
-
-1. **Synthesize Audio & Align Captions:**
-   For each section, call `mlx_tts` to generate clean narration WAV audio. Then invoke `alignment_provider` to generate acoustic energy VAD word timestamps.
-2. **Resolve Visual Requirements:**
-   For each visual beat in `scene_plan.json`, resolve requirements into verified assets (presenter video, diagrams, screenshots, or B-roll).
-3. **Compile Manifest:**
-   Save `artifacts/asset_manifest.json` ensuring every generated, imported, or recorded asset is registered with its SHA-256, duration, dimensions, provider provenance, and costs ($0.00 for local).
+## Review focus / success criteria
+Mirror the manifest: clean narration, forced word timings (method stated), presenter assets real-or-skipped, every visual beat satisfied.
