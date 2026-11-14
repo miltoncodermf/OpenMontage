@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/fact_sheet",
+  "title": "Fact sheet",
+  "description": "Claims with provenance. Every claim used in a script needs >=1 source; key claims >=2 independent sources (checked by lib/research_contract.py).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "facts"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "total_facts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "fact_id",
+          "claim",
+          "source_ref",
+          "retrieved_at",
+          "confidence",
+          "corroborated_by"
+        ],
+        "properties": {
+          "fact_id": {
+            "type": "string"
+          },
+          "claim": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "source_ref": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "file",
+                  "line"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "file"
+                  },
+                  "file": {
+                    "type": "string"
+                  },
+                  "line": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "file",
+                  "page"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "pdf"
+                  },
+                  "file": {
+                    "type": "string"
+                  },
+                  "page": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "url"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "url"
+                  },
+                  "url": {
+                    "type": "string",
+                    "pattern": "^https?://"
+                  }
+                }
+              }
+            ]
+          },
+          "source_url": {
+            "type": "string"
+          },
+          "retrieved_at": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "corroborated_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "fact_ids or URLs of independent corroborating sources"
+          },
+          "key_claim": {
+            "type": "boolean"
+          },
+          "untrusted_source": {
+            "type": "boolean"
+          },
+          "verified": {
+            "type": "boolean"
+          },
+          "context": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

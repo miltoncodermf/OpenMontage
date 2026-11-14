@@ -942,3 +942,171 @@ class TestPaidCallGuard:
     def test_over_120_percent_blocks(self):
         assert self._call(est_usd=0.3, actual_spent_usd=2.0)["allowed"] is True   # 2.3 <= 2.4
         assert self._call(est_usd=0.5, actual_spent_usd=2.0)["allowed"] is False  # 2.5 > 2.4
+
+
+# ---------------------------------------------------------------------------
+# v3 fast checks (P2): inputs, research contract, rights, attributions
+# ---------------------------------------------------------------------------
+
+
+class TestV3InputsAndResearch:
+    @pytest.fixture
+    def project(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+        (repo / "README.md").write_text("# Tool\nThe pipeline uses 4 stages and 24 GB of memory.\n", encoding="utf-8")
+        (repo / "docs.md").write_text("Out of focus note with 99% unrelated trivia inside it.\n", encoding="utf-8")
+        (repo / ".env").write_text("API_KEY=abcdefgh12345678\n", encoding="utf-8")
+        proj = tmp_path / "proj"
+        (proj / "inputs").mkdir(parents=True)
+        return tmp_path, repo, proj
+
+    def _write_inputs(self, proj, body):
+        (proj / "inputs" / "inputs.yaml").write_text(body, encoding="utf-8")
+
+    def _validate_outputs(self, proj):
+        from schemas.artifacts import validate_artifact
+
+        validate_artifact("input_manifest", json.loads((proj / "artifacts" / "input_manifest.json").read_text()))
+        validate_artifact("fact_sheet", json.loads((proj / "artifacts" / "fact_sheet.json").read_text()))
+
+    def test_repo_mode_with_focus_and_secret_exclusion(self, project):
+        from lib.inputs_contract import ingest_inputs
+
+        _, repo, proj = project
+        self._write_inputs(proj, f"repos:\n  - path: {repo}\n    focus: [src/, README.md]\n")
+        data = ingest_inputs(proj)
+        assert data["modes"] == ["repo"]
+        self._validate_outputs(proj)
+        manifest = json.loads((proj / "artifacts" / "input_manifest.json").read_text())
+        names = {s["filename"] for s in manifest["sources"]}
+        assert names == {"app.py", "README.md"}  # focus filter drops docs.md; .env never collected
+        facts = json.loads((proj / "artifacts" / "fact_sheet.json").read_text())["facts"]
+        assert facts and facts[0]["source_ref"]["kind"] == "file" and facts[0]["source_ref"]["line"] == 2
+
+    def test_pdf_mode_page_refs_and_unsupported_scanned(self, project):
+        from lib.inputs_contract import ingest_inputs
+
+        _, _, proj = project
+        pytest.importorskip("pypdf")
+        from pypdf import PdfWriter
+
+        w = PdfWriter()
+        w.add_blank_page(width=200, height=200)  # no text layer -> unsupported (no OCR in v3)
+        with open(proj / "inputs" / "scan.pdf", "wb") as f:
+            w.write(f)
+        self._write_inputs(proj, "pdfs:\n  - scan.pdf\n")
+        ingest_inputs(proj)
+        manifest = json.loads((proj / "artifacts" / "input_manifest.json").read_text())
+        assert manifest["modes"] == ["pdf"]
+        assert manifest["sources"][0]["status"] == "unsupported"
+        assert "no extractable text" in manifest["sources"][0]["error"]
+        self._validate_outputs(proj)
+
+    def test_url_mode_mocked(self, project, monkeypatch):
+        from lib.inputs_contract import ingest_inputs
+        from tools.ingestion import universal_ingestor as ui
+
+        _, _, proj = project
+        monkeypatch.setattr(ui.UniversalIngestor, "_ingest_url", lambda self, url, sid: {
+            "source_id": sid, "file_path": url, "filename": "Docs", "file_type": "url", "status": "supported",
+            "sha256": "0" * 64, "word_count": 9, "byte_size": 10,
+            "content": "Getting started takes 5 sec with the new pipeline architecture overview.",
+        })
+        self._write_inputs(proj, "urls:\n  - https://example.com/docs/start\n")
+        ingest_inputs(proj)
+        self._validate_outputs(proj)
+        facts = json.loads((proj / "artifacts" / "fact_sheet.json").read_text())["facts"]
+        assert facts[0]["source_ref"] == {"kind": "url", "url": "https://example.com/docs/start"}
+        assert facts[0]["source_url"] == "https://example.com/docs/start"
+
+    def test_topic_only_mode_has_no_sources(self, project):
+        from lib.inputs_contract import ingest_inputs
+
+        _, _, proj = project
+        self._write_inputs(proj, 'topic: "How unified memory speeds up local AI"\n')
+        data = ingest_inputs(proj)
+        assert data["modes"] == ["topic"] and data["total_sources"] == 0
+        self._validate_outputs(proj)
+
+    def test_combined_modes(self, project, monkeypatch):
+        from lib.inputs_contract import ingest_inputs
+        from tools.ingestion import universal_ingestor as ui
+
+        _, repo, proj = project
+        monkeypatch.setattr(ui.UniversalIngestor, "_ingest_url", lambda self, url, sid: {
+            "source_id": sid, "file_path": url, "filename": "d", "file_type": "url", "status": "supported",
+            "sha256": "0" * 64, "word_count": 1, "byte_size": 1, "content": ""})
+        self._write_inputs(proj, f'topic: "unified memory"\nrepos:\n  - path: {repo}\nurls:\n  - https://example.com/a\n')
+        data = ingest_inputs(proj)
+        assert data["modes"] == ["repo", "topic", "url"]
+        self._validate_outputs(proj)
+
+    def test_unsupported_input_keys_rejected(self, project):
+        from lib.inputs_contract import InputsError, load_inputs
+
+        _, _, proj = project
+        self._write_inputs(proj, "docx:\n  - report.docx\n")
+        with pytest.raises(InputsError, match="unsupported input keys"):
+            load_inputs(proj / "inputs" / "inputs.yaml")
+        self._write_inputs(proj, "{}\n")
+        with pytest.raises(InputsError):
+            load_inputs(proj / "inputs" / "inputs.yaml")
+        self._write_inputs(proj, "urls:\n  - ftp://example.com/x\n")
+        with pytest.raises(InputsError):
+            load_inputs(proj / "inputs" / "inputs.yaml")
+
+    def test_removed_formats_are_unsupported(self, project):
+        _, repo, proj = project
+        (repo / "report.docx").write_bytes(b"PK\x03\x04")
+        (repo / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+        from lib.inputs_contract import ingest_inputs
+
+        self._write_inputs(proj, f"repos:\n  - path: {repo}\n")
+        ingest_inputs(proj)
+        manifest = json.loads((proj / "artifacts" / "input_manifest.json").read_text())
+        by_name = {s["filename"]: s for s in manifest["sources"]}
+        assert by_name["report.docx"]["status"] == "unsupported"
+        assert by_name["data.csv"]["status"] == "unsupported"
+
+    def test_rights_fields_required_for_sourced_assets(self):
+        from schemas.artifacts import validate_artifact
+        import jsonschema
+
+        base = {"version": "2.0", "assets": [{"asset_id": "i1", "asset_type": "sourced_image", "path": "assets/images/a.jpg"}]}
+        with pytest.raises(jsonschema.ValidationError):
+            validate_artifact("asset_manifest", base)
+        base["assets"][0].update({
+            "rights_status": "open_licensed", "license": "CC0", "source_url": "https://commons.wikimedia.org/x",
+            "attribution": "Photo by A", "retrieved_at": "2026-11-13T00:00:00Z"})
+        validate_artifact("asset_manifest", base)
+        # non-sourced assets are unaffected
+        validate_artifact("asset_manifest", {"version": "2.0", "assets": [{"asset_id": "n", "asset_type": "narration", "path": "a.wav"}]})
+
+    def test_research_contract_and_attributions(self):
+        from lib.attributions import build_attributions, format_attributions
+        from lib.research_contract import asset_rights_problems, brief_problems, script_claim_problems
+
+        assert brief_problems({"data_points": [{"claim": "x"}], "media_candidates": [{"candidate_id": "m"}]})
+        assert not brief_problems({"data_points": [{"claim": "x", "source_ref": {"kind": "url", "url": "https://a"}}]})
+
+        sheet = {"facts": [
+            {"fact_id": "f1", "source_ref": {"kind": "url", "url": "https://a"}, "corroborated_by": []},
+            {"fact_id": "f2", "key_claim": True, "source_ref": {"kind": "url", "url": "https://a"}, "corroborated_by": []},
+            {"fact_id": "f3", "key_claim": True, "source_ref": {"kind": "url", "url": "https://a"}, "corroborated_by": ["https://b"]},
+        ]}
+        problems = script_claim_problems(["f1", "f2", "f3", "f9"], sheet)
+        assert any("f2" in p and ">= 2" in p for p in problems)
+        assert any("f9" in p for p in problems)
+        assert not any(p.startswith(("f1", "f3")) for p in problems)
+
+        manifest = {"assets": [
+            {"asset_id": "i1", "asset_type": "sourced_image", "attribution": "A", "license": "CC0", "source_url": "https://u"},
+            {"asset_id": "c1", "asset_type": "sandbox_capture", "source_url": "https://site.test"},
+            {"asset_id": "n", "asset_type": "narration"},
+        ]}
+        assert asset_rights_problems(manifest)
+        entries = build_attributions(manifest)
+        assert [e["asset_id"] for e in entries] == ["i1", "c1"]
+        assert "Screen capture of https://site.test" in format_attributions(entries)

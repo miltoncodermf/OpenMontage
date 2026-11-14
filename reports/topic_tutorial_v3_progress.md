@@ -33,3 +33,16 @@ Acceptance:
 - Manifest validates (`load_pipeline("topic-tutorial")` → version 3.0).
 - Routing coverage test, skills-reference-existing-stock-files test, gates test, paid-call guard tests → in `tests/contracts/test_topic_tutorial.py` (40 passed).
 - `.venv/bin/pytest tests/contracts -q` → 1584 passed, 9 skipped.
+
+## Phase 2 — Inputs & research
+
+Done:
+- `inputs.yaml` contract (`schemas/artifacts/inputs.schema.json`, `lib/inputs_contract.py`): only `topic`, `repos[{path,focus}]`, `urls`, `pdfs` (any other key is rejected).
+- `universal_ingestor` accepts `inputs_spec` (modes repo/url/pdf/topic); repo `focus` filter; every fact now carries `source_ref` (file+line / PDF page / URL), `retrieved_at`, `confidence`, `corroborated_by[]`, `untrusted_source: true`. Scanned PDFs → `status: unsupported` (no OCR).
+- New schemas `input_manifest`, `fact_sheet`; `research_brief` gains optional `data_points[].source_ref` and `media_candidates[]` (rights fields required); `asset_manifest` gains `sourced_image|sourced_clip|sandbox_capture|presenter_matte|presenter_loop|onboarding_source` types, rights/identity fields, and **requires** `rights_status, license, source_url, attribution, retrieved_at` for `sourced_*` assets.
+- `lib/research_contract.py` (source_ref on every data point; ≥1 source per script claim, ≥2 for key claims; rights on media) and `lib/attributions.py` (publish attributions list); skills updated to call them.
+- Not done / not run: the live deep-research workers and Gemini Deep Research toggle are agent-protocol only (in the skill); no network research was executed. Sandbox URL screenshots depend on P3.
+
+Acceptance:
+- Fast tests (repo, PDF, URL mocked, topic-only, combined; unsupported keys; removed formats; rights fields) → `tests/contracts/test_topic_tutorial.py`: 49 passed.
+- `.venv/bin/pytest tests/contracts -q` → see commit run (all green).

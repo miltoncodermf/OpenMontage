@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/inputs",
+  "title": "Topic-tutorial inputs",
+  "description": "projects/<id>/inputs/inputs.yaml \u2014 the supported, combinable inputs (spec D11): a topic, local code repos, website URLs, local PDFs.",
+  "type": "object",
+  "additionalProperties": false,
+  "anyOf": [
+    {
+      "required": [
+        "topic"
+      ]
+    },
+    {
+      "required": [
+        "repos"
+      ]
+    },
+    {
+      "required": [
+        "urls"
+      ]
+    },
+    {
+      "required": [
+        "pdfs"
+      ]
+    }
+  ],
+  "properties": {
+    "topic": {
+      "type": "string",
+      "minLength": 3
+    },
+    "repos": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "focus": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "urls": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^https?://"
+      }
+    },
+    "pdfs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "(?i)\\.pdf$"
+      }
+    }
+  }
+}

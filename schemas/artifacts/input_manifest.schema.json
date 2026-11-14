@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/input_manifest",
+  "title": "Input manifest",
+  "description": "Result of universal_ingestor over inputs.yaml (modes: repo, url, pdf, topic).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "modes",
+    "summary",
+    "sources"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "ingested_at": {
+      "type": "string"
+    },
+    "input_target": {
+      "type": "string"
+    },
+    "project_dir": {
+      "type": "string"
+    },
+    "topic": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "modes": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "repo",
+          "url",
+          "pdf",
+          "topic"
+        ]
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "total_sources",
+        "supported_sources",
+        "unsupported_sources",
+        "total_word_count"
+      ]
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "source_id",
+          "status",
+          "mode"
+        ],
+        "properties": {
+          "source_id": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "repo",
+              "url",
+              "pdf"
+            ]
+          },
+          "status": {
+            "enum": [
+              "supported",
+              "unsupported",
+              "redacted_sensitive"
+            ]
+          },
+          "retrieved_at": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

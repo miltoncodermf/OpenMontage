@@ -148,8 +148,11 @@ class UniversalIngestor(BaseTool):
 
     input_schema = {
         "type": "object",
-        "required": ["input_path"],
         "properties": {
+            "inputs_spec": {
+                "type": "object",
+                "description": "Parsed inputs.yaml: {topic?, repos:[{path,focus[]}], urls[], pdfs[]}",
+            },
             "input_path": {
                 "type": "string",
                 "description": "Path to a file, directory, repository, or a web URL",
@@ -194,10 +197,13 @@ class UniversalIngestor(BaseTool):
         return 0.0
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
+        """Ingest either a single ``input_path`` (legacy) or a full ``inputs_spec``
+        (the parsed ``inputs.yaml``: topic / repos / urls / pdfs — spec D11)."""
         started = time.time()
+        spec = inputs.get("inputs_spec")
         input_target = str(inputs.get("input_path", "")).strip()
-        if not input_target:
-            return ToolResult(success=False, error="input_path must be a non-empty path or URL")
+        if not spec and not input_target:
+            return ToolResult(success=False, error="provide input_path or inputs_spec (topic/repos/urls/pdfs)")
 
         project_dir_str = inputs.get("project_dir")
         project_dir = Path(project_dir_str) if project_dir_str else Path.cwd()
@@ -209,37 +215,63 @@ class UniversalIngestor(BaseTool):
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         sources: list[dict[str, Any]] = []
-        source_counter = 1
+        topic: Optional[str] = None
+        retrieved_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-        is_url = input_target.startswith("http://") or input_target.startswith("https://")
+        def next_id() -> str:
+            return f"src_{len(sources) + 1:03d}"
 
-        if is_url:
-            src_info = self._ingest_url(input_target, f"src_{source_counter:03d}")
-            sources.append(src_info)
+        def add(src: dict[str, Any], mode: str) -> None:
+            src["mode"] = mode
+            src["retrieved_at"] = retrieved_at
+            sources.append(src)
+
+        if spec:
+            topic = (spec.get("topic") or "").strip() or None
+            for repo in spec.get("repos") or []:
+                root = Path(str(repo["path"])).expanduser()
+                if not root.is_dir():
+                    add({"source_id": next_id(), "file_path": str(root), "filename": root.name, "status": "unsupported",
+                         "error": "Repo path is not a directory", "sha256": None, "word_count": 0, "byte_size": 0, "content": ""}, "repo")
+                    continue
+                files = self._collect_directory_files(root, max_files)
+                focus = [str(f).strip("/") for f in (repo.get("focus") or [])]
+                if focus:
+                    files = [
+                        f for f in files
+                        if any(
+                            (rel := f.relative_to(root).as_posix()) == fo or rel.startswith(fo + "/")
+                            for fo in focus
+                        )
+                    ]
+                for fpath in files:
+                    add(self._ingest_file(fpath, next_id(), max_file_size_bytes, allowed_root=root), "repo")
+            for url in spec.get("urls") or []:
+                add(self._ingest_url(str(url), next_id()), "url")
+            for pdf in spec.get("pdfs") or []:
+                pdf_path = Path(str(pdf)).expanduser()
+                if not pdf_path.is_absolute():
+                    pdf_path = project_dir / "inputs" / pdf_path if not (project_dir / pdf_path).exists() else project_dir / pdf_path
+                if pdf_path.suffix.lower() != ".pdf":
+                    add({"source_id": next_id(), "file_path": str(pdf_path), "filename": pdf_path.name, "status": "unsupported",
+                         "error": "pdfs[] entries must be .pdf files", "sha256": None, "word_count": 0, "byte_size": 0, "content": ""}, "pdf")
+                elif not pdf_path.is_file():
+                    add({"source_id": next_id(), "file_path": str(pdf_path), "filename": pdf_path.name, "status": "unsupported",
+                         "error": "PDF not found", "sha256": None, "word_count": 0, "byte_size": 0, "content": ""}, "pdf")
+                else:
+                    add(self._ingest_file(pdf_path, next_id(), max_file_size_bytes, allowed_root=pdf_path.parent), "pdf")
+        elif input_target.startswith(("http://", "https://")):
+            add(self._ingest_url(input_target, next_id()), "url")
         else:
             target_path = Path(input_target).expanduser()
             if not target_path.exists():
                 return ToolResult(success=False, error=f"Target path does not exist: {target_path}")
-
             if target_path.is_file():
-                src_info = self._ingest_file(
-                    target_path,
-                    f"src_{source_counter:03d}",
-                    max_file_size_bytes,
-                    allowed_root=target_path.parent,
-                )
-                sources.append(src_info)
+                add(self._ingest_file(target_path, next_id(), max_file_size_bytes, allowed_root=target_path.parent),
+                    "pdf" if target_path.suffix.lower() == ".pdf" else "repo")
             elif target_path.is_dir():
-                file_list = self._collect_directory_files(target_path, max_files)
-                for fpath in file_list:
-                    src_info = self._ingest_file(
-                        fpath,
-                        f"src_{source_counter:03d}",
-                        max_file_size_bytes,
-                        allowed_root=target_path,
-                    )
-                    sources.append(src_info)
-                    source_counter += 1
+                for fpath in self._collect_directory_files(target_path, max_files):
+                    add(self._ingest_file(fpath, next_id(), max_file_size_bytes, allowed_root=target_path), "repo")
 
         # Fact sheet generation - only from prose documents, never raw code
         facts: list[dict[str, Any]] = []
@@ -251,8 +283,7 @@ class UniversalIngestor(BaseTool):
                     and src.get("content")
                     and src.get("file_type") in {"text", "pdf", "url"}
                 ):
-                    extracted = self._extract_facts(src["content"], src["source_id"])
-                    for fact in extracted:
+                    for fact in self._extract_facts(src["content"], src["source_id"], src):
                         fact["fact_id"] = f"fact_{fact_counter:03d}"
                         facts.append(fact)
                         fact_counter += 1
@@ -260,12 +291,15 @@ class UniversalIngestor(BaseTool):
         total_words = sum(s.get("word_count", 0) for s in sources)
         supported_count = sum(1 for s in sources if s.get("status") == "supported")
         unsupported_count = len(sources) - supported_count
+        modes = sorted({s["mode"] for s in sources} | ({"topic"} if topic else set()))
 
         input_manifest = {
             "schema_version": "1.0",
-            "ingested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "input_target": input_target,
+            "ingested_at": retrieved_at,
+            "input_target": input_target or "inputs.yaml",
             "project_dir": str(project_dir),
+            "topic": topic,
+            "modes": modes,
             "summary": {
                 "total_sources": len(sources),
                 "supported_sources": supported_count,
@@ -277,7 +311,7 @@ class UniversalIngestor(BaseTool):
 
         fact_sheet = {
             "schema_version": "1.0",
-            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "generated_at": retrieved_at,
             "total_facts": len(facts),
             "facts": facts,
         }
@@ -297,6 +331,7 @@ class UniversalIngestor(BaseTool):
             data={
                 "input_manifest": str(manifest_path),
                 "fact_sheet": str(fact_sheet_path),
+                "modes": modes,
                 "total_sources": len(sources),
                 "supported_sources": supported_count,
                 "unsupported_sources": unsupported_count,
@@ -519,7 +554,7 @@ class UniversalIngestor(BaseTool):
                         extracted = page.extract_text() or ""
                         if extracted:
                             pages_text.append(extracted)
-                    full_text = "\n\n".join(pages_text)
+                    full_text = "\f".join(pages_text)
                     if not full_text.strip():
                         return {
                             "source_id": source_id,
@@ -676,24 +711,48 @@ class UniversalIngestor(BaseTool):
                 "content": "",
             }
 
-    def _extract_facts(self, text: str, source_id: str) -> list[dict[str, Any]]:
+    def _extract_facts(
+        self, text: str, source_id: str, source: Optional[dict[str, Any]] = None
+    ) -> list[dict[str, Any]]:
+        """Heuristic claim candidates with a precise source_ref (file+line, PDF page, or URL)."""
+        source = source or {}
+        file_type = source.get("file_type")
+        origin = source.get("file_path", "")
+        retrieved_at = source.get("retrieved_at") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         facts: list[dict[str, Any]] = []
-        lines = text.splitlines()
-        for line in lines:
-            line_str = line.strip().lstrip("-*#0123456789. ")
-            # Prompt injection defense
-            if PROMPT_INJECTION_REGEX.search(line_str):
-                continue
-
-            if 25 < len(line_str) < 300:
-                if re.search(r"(\d+%|\$\d+|\b\d{4}\b|\bcores\b|\bGB\b|\bMB\b|\bsec\b|\barchitecture\b|\bpipeline\b|\bmodule\b|\bstage\b)", line_str, re.IGNORECASE):
-                    facts.append({
-                        "claim": line_str,
-                        "source_id": source_id,
-                        "context": line.strip()[:150],
-                        "verified": False,
-                        "untrusted_source": True,
-                    })
-                    if len(facts) >= 20:
-                        break
+        lineno = 0
+        for page, page_text in enumerate(text.split("\f"), start=1):
+            for line in page_text.split("\n"):
+                lineno += 1
+                clean = line
+                line_str = clean.strip().lstrip("-*#0123456789. ")
+                # Prompt injection defense
+                if PROMPT_INJECTION_REGEX.search(line_str):
+                    continue
+                if not (25 < len(line_str) < 300):
+                    continue
+                if not re.search(r"(\d+%|\$\d+|\b\d{4}\b|\bcores\b|\bGB\b|\bMB\b|\bsec\b|\barchitecture\b|\bpipeline\b|\bmodule\b|\bstage\b)", line_str, re.IGNORECASE):
+                    continue
+                if file_type == "url":
+                    source_ref: dict[str, Any] = {"kind": "url", "url": origin}
+                elif file_type == "pdf":
+                    source_ref = {"kind": "pdf", "file": origin, "page": page}
+                else:
+                    source_ref = {"kind": "file", "file": origin, "line": lineno}
+                fact: dict[str, Any] = {
+                    "claim": line_str,
+                    "source_id": source_id,
+                    "source_ref": source_ref,
+                    "retrieved_at": retrieved_at,
+                    "confidence": "low",
+                    "corroborated_by": [],
+                    "context": clean.strip()[:150],
+                    "verified": False,
+                    "untrusted_source": True,
+                }
+                if file_type == "url":
+                    fact["source_url"] = origin
+                facts.append(fact)
+                if len(facts) >= 20:
+                    return facts
         return facts

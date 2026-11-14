@@ -21,7 +21,9 @@
               "image", "video", "audio", "narration", "music", "sfx", "diagram",
               "animation", "3d_asset", "3d_world", "code_snippet", "subtitle",
               "font", "lut", "presenter_video", "screen_recording", "screenshot",
-              "chart", "broll", "generated_broll_video"
+              "chart", "broll", "generated_broll_video",
+              "sourced_image", "sourced_clip", "sandbox_capture", "presenter_matte",
+              "presenter_loop", "onboarding_source"
             ]
           },
           "asset_type": {
@@ -30,7 +32,9 @@
               "image", "video", "audio", "narration", "music", "sfx", "diagram",
               "animation", "3d_asset", "3d_world", "code_snippet", "subtitle",
               "font", "lut", "presenter_video", "screen_recording", "screenshot",
-              "chart", "broll", "generated_broll_video"
+              "chart", "broll", "generated_broll_video",
+              "sourced_image", "sourced_clip", "sandbox_capture", "presenter_matte",
+              "presenter_loop", "onboarding_source"
             ]
           },
           "path": { "type": "string", "description": "Relative path within the pipeline project directory" },
@@ -64,6 +68,13 @@
           "rights_status": { "type": "string" },
           "license": { "type": "string" },
           "original_url": { "type": "string" },
+          "source_url": { "type": "string" },
+          "attribution": { "type": "string" },
+          "retrieved_at": { "type": "string" },
+          "identity_transform": { "type": "string", "enum": ["beautified", "none"], "description": "Presenter assets must be 'beautified' (topic-tutorial spec D3)." },
+          "profile_id": { "type": "string" },
+          "alignment_method": { "type": "string", "enum": ["forced", "heuristic"] },
+          "presenter_status": { "type": "string" },
           "format": { "type": "string" },
           "mime_type": { "type": "string" },
           "status": { "type": "string" },
@@ -80,7 +91,18 @@
             "additionalProperties": true
           }
         },
-        "additionalProperties": true
+        "additionalProperties": true,
+        "allOf": [
+          {
+            "description": "Sourced media must carry its rights record (spec §5.4b).",
+            "if": { "required": ["type"], "properties": { "type": { "enum": ["sourced_image", "sourced_clip"] } } },
+            "then": { "required": ["rights_status", "license", "source_url", "attribution", "retrieved_at"] }
+          },
+          {
+            "if": { "required": ["asset_type"], "properties": { "asset_type": { "enum": ["sourced_image", "sourced_clip"] } } },
+            "then": { "required": ["rights_status", "license", "source_url", "attribution", "retrieved_at"] }
+          }
+        ]
       }
     },
     "total_cost_usd": { "type": "number", "minimum": 0 },
