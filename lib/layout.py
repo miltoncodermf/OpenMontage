@@ -11,7 +11,8 @@ from typing import Any
 
 MARGIN_X = 0.05
 MARGIN_Y = 0.06
-CAPTION_CLEARANCE = 0.055
+CAPTION_TOP = 0.8  # top of the caption-safe zone; bottom PIPs sit above it
+CAPTION_GAP = 0.02
 PIP_POSITIONS = ("bottom-right", "bottom-left", "top-right", "top-left")
 FULL = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
 
@@ -43,7 +44,7 @@ def pip_rect(position: str, width_fraction: float, canvas: dict[str, Any]) -> Re
     w = width_fraction
     h = (w * canvas["width"] * 9 / 16) / canvas["height"]
     x = 1 - MARGIN_X - w if position.endswith("right") else MARGIN_X
-    y = 1 - MARGIN_Y - CAPTION_CLEARANCE - h if position.startswith("bottom") else MARGIN_Y
+    y = CAPTION_TOP - CAPTION_GAP - h if position.startswith("bottom") else MARGIN_Y
     return {"x": x, "y": y, "w": w, "h": h}
 
 

@@ -1993,6 +1993,17 @@ class TestV3AspectSeam:
         assert not layout.covers_focus(layout.pip_rect(cut["presenterPipPosition"], 0.25, canvas), focus)
         assert "layoutWarning" not in cut
 
+    def test_bottom_pip_never_overlaps_caption_safe_zone(self):
+        from lib import layout
+
+        canvas = {"width": 1920, "height": 1080}
+        cap = layout.caption_safe(canvas)
+        for pos in ("bottom-right", "bottom-left"):
+            assert layout.overlap_area(layout.pip_rect(pos, 0.25, canvas), cap) == 0.0, pos
+        for pos in layout.PIP_POSITIONS:  # every corner stays on-canvas
+            r = layout.pip_rect(pos, 0.25, canvas)
+            assert r["x"] >= 0 and r["y"] >= 0 and r["x"] + r["w"] <= 1 and r["y"] + r["h"] <= 1
+
     def test_focus_region_validation(self):
         from lib.layout import validate_focus_region
         from schemas.artifacts import validate_artifact

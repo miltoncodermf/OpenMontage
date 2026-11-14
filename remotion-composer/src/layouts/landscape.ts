@@ -2,7 +2,8 @@ import { Canvas, Layout, PipPosition, Rect } from "./types";
 
 const MARGIN_X = 0.05;
 const MARGIN_Y = 0.06;
-const CAPTION_CLEARANCE = 0.055; // keep the PIP slightly above the caption zone
+const CAPTION_TOP = 0.8; // top of the caption-safe zone; bottom PIPs sit above it
+const CAPTION_GAP = 0.02;
 
 /** 16:9 (and any landscape) layout. Everything is normalized; pixels are derived from the canvas. */
 export const landscape: Layout = {
@@ -13,7 +14,7 @@ export const landscape: Layout = {
     // PIP window keeps a 16:9 shape in pixels, whatever the canvas.
     const h = (w * canvas.width * (9 / 16)) / canvas.height;
     const x = position.endsWith("right") ? 1 - MARGIN_X - w : MARGIN_X;
-    const y = position.startsWith("bottom") ? 1 - MARGIN_Y - CAPTION_CLEARANCE - h : MARGIN_Y;
+    const y = position.startsWith("bottom") ? CAPTION_TOP - CAPTION_GAP - h : MARGIN_Y;
     return { x, y, w, h };
   },
 

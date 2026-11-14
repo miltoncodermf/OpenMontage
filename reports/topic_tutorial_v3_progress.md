@@ -131,3 +131,18 @@ Not run: a real Remotion render of the new components with a real alpha presente
 Acceptance (fast): 16:9 and 9:16 compile of the same plan, matte/alpha, focus-region PIP move, beat types, focus validation, legibility validator + TS sync, diagram splitting, two-pass mastering, final-review loudness + honesty fail/pass, schema → `tests/contracts/test_topic_tutorial.py` 111 passed; `tests/contracts` 1669 passed, 9 skipped. Whole `tests/` (excluding `tests/tools/test_gemini_omni_video.py`): 3051 passed, 14 skipped.
 
 Pre-existing, not caused by this branch: `tests/tools/test_gemini_omni_video.py` has 25 failures on `main` too (schema `model` enum no longer matches what the test expects); files untouched here. Follow-up for the owner.
+
+## Phase 8 — Tests consolidation
+
+Done:
+- `tests/contracts/test_topic_tutorial.py` split into `test_topic_tutorial_fast.py` (112 tests, ~11 s — under the 30 s budget; no models, no network, no sandbox) and `test_topic_tutorial_smoke.py` (1 test, opt-in).
+- `smoke` marker registered in `tests/conftest.py`; smoke is **skipped unless `-m smoke`** (so `pytest tests/contracts/test_topic_tutorial*.py` runs only the fast layer).
+- Smoke test (real local run, no paid APIs): Kokoro narration (~10 s) → `script_aligner` → R128 two-pass mastering → real Remotion render, 1280×720, diagram beat + a `TEST_ONLY_` presenter layer → ffprobe (1280×720, 30 fps, video+audio, duration = narration + 1 s tail), loudness within target, caption timings monotonic and inside the audio, `fixture_presenter_percentage > 0` while `presenter_percentage == 0` → `final_review.status == "fail"` because of the `TEST_ONLY_` asset; a diagram-only variant passes. It sets `HF_HUB_OFFLINE=1` (tests block the network) and skips cleanly when ffmpeg / Remotion / Kokoro narration are unavailable.
+- Obsolete tests: the v2 tests tied to behaviour removed in earlier phases were rewritten in place during P0–P7 (fixture presenter counted as real, raw presenter registered by the resolver, assets gate off); no tests for still-existing tools (e.g. `local_talking_head`, which remains in the registry but is no longer in the topic-tutorial manifest) were deleted.
+- One extra fix found while rendering: the bottom PIP overlapped the caption bar; bottom PIPs now sit above the caption-safe zone (TS + Python layouts, tested).
+
+Acceptance (actual runs):
+- Fast: `.venv/bin/pytest tests/contracts/test_topic_tutorial*.py -q` → 112 passed, 1 skipped (smoke opt-in), ~11 s.
+- Smoke: `.venv/bin/pytest -m smoke tests/contracts/test_topic_tutorial_smoke.py -q` → 1 passed in ~56 s.
+- Full contracts: `.venv/bin/pytest tests/contracts -q` → 1670 passed, 10 skipped.
+- Whole repo `tests/` excluding `tests/tools/test_gemini_omni_video.py` (25 failures that exist on `main`, untouched by this branch): 3051 passed, 14 skipped (run before the last small layout change; contracts re-run after).
