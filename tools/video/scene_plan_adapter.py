@@ -57,6 +57,17 @@ class ScenePlanAdapter:
             a for a in assets if (a.get("asset_type") or a.get("type")) in ("presenter_video", "presenter")
         ]
         default_presenter_video = presenter_assets[0]["path"] if presenter_assets else None
+        from lib.presenter_guard import is_real_presenter_asset
+
+        def _abs(path: str) -> str:
+            pth = Path(path)
+            if not pth.is_absolute() and self.project_dir:
+                pth = self.project_dir / pth
+            return str(pth.resolve())
+
+        real_presenter_paths = {
+            _abs(a["path"]) for a in presenter_assets if a.get("path") and is_real_presenter_asset(a)
+        }
 
         sections = plan_v2.get("sections", [])
         accent_color = self.palette.get("accent", ["#22D3EE"])[0]
@@ -72,7 +83,15 @@ class ScenePlanAdapter:
 
         total_runtime_s = 0.0
         text_card_duration_s = 0.0
-        presenter_duration_s = 0.0
+        presenter_duration_s = 0.0  # real (beautified-twin) presenter seconds only
+        fixture_presenter_duration_s = 0.0  # test-only / unverified presenter seconds — never counted as real
+
+        def _count_presenter(path: str | None, dur: float) -> None:
+            nonlocal presenter_duration_s, fixture_presenter_duration_s
+            if path and str(Path(path).resolve()) in real_presenter_paths:
+                presenter_duration_s += dur
+            else:
+                fixture_presenter_duration_s += dur
         meaningful_visual_duration_s = 0.0
 
         for sec_idx, section in enumerate(sections):
@@ -156,7 +175,7 @@ class ScenePlanAdapter:
                         cut["type"] = "presenter_fullscreen"
                         cut["title"] = beat.get("title") or section.get("learning_objective", "")
                         cut["subtitle"] = section.get("key_takeaway", "")
-                        presenter_duration_s += actual_beat_dur
+                        _count_presenter(presenter_path, actual_beat_dur)
                         meaningful_visual_duration_s += actual_beat_dur
                     else:
                         # Graceful fallback when presenter not provided
@@ -182,7 +201,7 @@ class ScenePlanAdapter:
                     cut["diagramSpec"] = spec
                     meaningful_visual_duration_s += actual_beat_dur
                     if pip_requested and presenter_path:
-                        presenter_duration_s += actual_beat_dur
+                        _count_presenter(presenter_path, actual_beat_dur)
 
                 elif v_type in ("screenshot_scene", "screenshot_callout"):
                     cut["type"] = "screenshot_scene"
@@ -201,7 +220,7 @@ class ScenePlanAdapter:
                     ]
                     meaningful_visual_duration_s += actual_beat_dur
                     if pip_requested and presenter_path:
-                        presenter_duration_s += actual_beat_dur
+                        _count_presenter(presenter_path, actual_beat_dur)
 
                 elif v_type == "screen_recording":
                     cut["type"] = "video"
@@ -215,7 +234,7 @@ class ScenePlanAdapter:
                     cut["source"] = video_path
                     meaningful_visual_duration_s += actual_beat_dur
                     if pip_requested and presenter_path:
-                        presenter_duration_s += actual_beat_dur
+                        _count_presenter(presenter_path, actual_beat_dur)
 
                 elif v_type in ("chart", "bar_chart", "line_chart", "pie_chart", "kpi_grid"):
                     cut["type"] = v_type if v_type != "chart" else "bar_chart"
@@ -272,6 +291,7 @@ class ScenePlanAdapter:
         # Calculate analytics
         text_card_ratio = round((text_card_duration_s / max(0.1, total_runtime_s)), 3)
         presenter_ratio = round((presenter_duration_s / max(0.1, total_runtime_s)), 3)
+        fixture_ratio = round((fixture_presenter_duration_s / max(0.1, total_runtime_s)), 3)
         meaningful_visual_ratio = round((meaningful_visual_duration_s / max(0.1, total_runtime_s)), 3)
 
         visual_analytics = {
@@ -279,6 +299,7 @@ class ScenePlanAdapter:
             "text_card_duration_seconds": round(text_card_duration_s, 2),
             "text_card_percentage": round(text_card_ratio * 100, 1),
             "presenter_percentage": round(presenter_ratio * 100, 1),
+            "fixture_presenter_percentage": round(fixture_ratio * 100, 1),
             "meaningful_visual_percentage": round(meaningful_visual_ratio * 100, 1),
             "total_cuts": len(cuts),
             "average_beat_duration_seconds": round(total_runtime_s / max(1, len(cuts)), 2),

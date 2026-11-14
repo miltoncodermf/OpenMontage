@@ -656,16 +656,18 @@ class TestScenePlanV2AndAdapterContract:
         analytics = compiled["visual_analytics"]
         assert analytics["text_card_percentage"] == 0.0
         assert analytics["meaningful_visual_percentage"] == 100.0
-        assert analytics["presenter_percentage"] > 0.0
+        # Honesty: a TEST_ONLY fixture presenter is never counted as a real presenter.
+        assert analytics["presenter_percentage"] == 0.0
+        assert analytics["fixture_presenter_percentage"] > 0.0
 
 
 class TestRecordedVideoProviderContract:
-    """Verifies media container verification and error handling for recorded presenter video."""
+    """Owner recordings are onboarding sources only (D3): validated, never rendered."""
 
     def test_probe_valid_presenter_video(self):
         from tools.presenters.recorded_video_provider import RecordedVideoProvider
 
-        fixture = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "presenter_fixture.mp4"
+        fixture = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "TEST_ONLY_presenter_fixture.mp4"
         if not fixture.is_file():
             pytest.skip("Presenter fixture not yet generated")
 
@@ -673,11 +675,23 @@ class TestRecordedVideoProviderContract:
         res = provider.execute({"video_path": str(fixture)})
         assert res.success is True
         data = res.data
-        assert data["asset"]["asset_type"] == "presenter_video"
+        assert data["asset"]["asset_type"] == "onboarding_source"
+        assert data["asset"]["identity_transform"] == "none"
         assert data["asset"]["resolution"] == "1920x1080"
         assert data["asset"]["width"] == 1920
         assert data["asset"]["height"] == 1080
         assert data["asset"]["fps"] == 30.0
+
+    def test_refuses_to_copy_raw_recording_into_project(self, tmp_path):
+        from tools.presenters.recorded_video_provider import RecordedVideoProvider
+
+        fixture = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "TEST_ONLY_presenter_fixture.mp4"
+        res = RecordedVideoProvider().execute({
+            "video_path": str(fixture),
+            "output_path": str(tmp_path / "projects" / "p" / "assets" / "presenter" / "x.mp4"),
+        })
+        assert res.success is False
+        assert "onboarding" in res.error.lower()
 
     def test_missing_video_fails_cleanly(self):
         from tools.presenters.recorded_video_provider import RecordedVideoProvider
@@ -719,9 +733,9 @@ class TestAssetResolverContract:
         from schemas.artifacts import validate_artifact
 
         resolver = AssetResolver(tmp_path)
-        fixture_p = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "presenter_fixture.mp4"
-        fixture_s = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "software_ui_screenshot.png"
-        fixture_r = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "screen_recording_fixture.mp4"
+        fixture_p = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "TEST_ONLY_presenter_fixture.mp4"
+        fixture_s = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "TEST_ONLY_software_ui_screenshot.png"
+        fixture_r = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "TEST_ONLY_screen_recording_fixture.mp4"
 
         # Create dummy narration wav
         wav_p = tmp_path / "assets" / "audio" / "s1.wav"
@@ -751,7 +765,6 @@ class TestAssetResolverContract:
         manifest = resolver.resolve_assets(
             scene_plan=plan,
             narration_items=[{"scene_id": "s1", "path": str(wav_p), "duration_s": 2.0}],
-            presenter_video_path=fixture_p if fixture_p.is_file() else None,
             screenshot_path=fixture_s if fixture_s.is_file() else None,
             screen_demo_path=fixture_r if fixture_r.is_file() else None,
         )
@@ -759,6 +772,34 @@ class TestAssetResolverContract:
         assert manifest["version"] == "2.0"
         assert len(manifest["assets"]) >= 2
         validate_artifact("asset_manifest", manifest)
+        # No raw/fixture presenter is ever registered by the resolver.
+        assert not [a for a in manifest["assets"] if "presenter" in (a.get("asset_type") or "")]
+
+    def test_presenter_guard_rejects_raw_and_fixture(self, tmp_path):
+        from lib.asset_resolver import AssetResolver
+        from lib.presenter_guard import PresenterGuardError
+
+        resolver = AssetResolver(tmp_path)
+        plan = {"version": "2.0", "sections": [{"section_id": "s", "script_section_id": "s", "visual_beats": [{"beat_id": "b", "visual_type": "diagram"}]}]}
+        bad_assets = [
+            {"asset_id": "p1", "asset_type": "presenter_video", "path": "x/TEST_ONLY_presenter.mp4",
+             "identity_transform": "beautified", "profile_id": "owner"},
+            {"asset_id": "p2", "asset_type": "presenter_video", "path": "x/raw/face_turn.mov",
+             "identity_transform": "none", "profile_id": "owner", "source_type": "owner_raw"},
+            {"asset_id": "p3", "asset_type": "presenter_video", "path": "x/clip.mp4"},
+        ]
+        for bad in bad_assets:
+            with pytest.raises(PresenterGuardError):
+                resolver.resolve_assets(plan, [], presenter_asset=bad)
+
+    def test_test_only_assets_fail_final_review_guard(self, monkeypatch):
+        from lib.honesty_guard import honesty_check
+
+        monkeypatch.delenv("OPENMONTAGE_TEST_MODE", raising=False)
+        res = honesty_check({"assets": [{"path": "assets/video/TEST_ONLY_x.mp4"}]})
+        assert res["blocking"] is True
+        monkeypatch.setenv("OPENMONTAGE_TEST_MODE", "1")
+        assert honesty_check({"assets": [{"path": "assets/video/TEST_ONLY_x.mp4"}]})["blocking"] is False
 
 
 class TestGeminiOmniVideoCostGuardContract:

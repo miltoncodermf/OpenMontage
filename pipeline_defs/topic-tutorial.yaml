@@ -150,9 +150,6 @@ stages:
       - tts_selector
       - mlx_tts
       - piper_tts
-      - local_talking_head
-      - recorded_video
-      - gemini_personal_avatar_import
       - google_flow_import
       - gemini_omni_video
       - diagram_gen
@@ -161,8 +158,6 @@ stages:
       - alignment_provider
       - code_snippet
       - direct_clip_search
-      - cap_recorder
-      - screen_recorder
       - threejs_world
     checkpoint_required: false
     human_approval_default: false

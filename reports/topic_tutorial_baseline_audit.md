@@ -1,3 +1,5 @@
+> **SUPERSEDED by `docs/topic-tutorial-v3-handoff.md`.** Claims in this report are not authoritative; where it disagrees with the v3 spec, the spec wins. Fixture-based metrics here (presenter, screenshot, screen recording) do not reflect real presenter or capture output.
+
 # Topic-Tutorial Pipeline: Baseline Audit Report
 
 **Date:** 2026-11-10  

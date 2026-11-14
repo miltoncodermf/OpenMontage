@@ -1134,6 +1134,7 @@ class VideoCompose(BaseTool):
             edit_decisions=edit_decisions,
             proposal_packet=inputs.get("proposal_packet"),
             narration_transcript_path=inputs.get("narration_transcript_path"),
+            asset_manifest=inputs.get("asset_manifest"),
             script_text=inputs.get("script_text"),
         )
 
@@ -1793,6 +1794,7 @@ class VideoCompose(BaseTool):
                 edit_decisions,
                 inputs.get("proposal_packet"),
                 narration_transcript_path=inputs.get("narration_transcript_path"),
+                asset_manifest=asset_manifest,
                 script_text=inputs.get("script_text") or self._read_text_file(
                     inputs.get("script_path")
                 ),
@@ -1930,6 +1932,7 @@ class VideoCompose(BaseTool):
                 edit_decisions,
                 inputs.get("proposal_packet"),
                 narration_transcript_path=inputs.get("narration_transcript_path"),
+                asset_manifest=asset_manifest,
                 script_text=inputs.get("script_text") or self._read_text_file(
                     inputs.get("script_path")
                 ),
@@ -1990,6 +1993,7 @@ class VideoCompose(BaseTool):
                 edit_decisions,
                 inputs.get("proposal_packet"),
                 narration_transcript_path=inputs.get("narration_transcript_path"),
+                asset_manifest=inputs.get("asset_manifest"),
                 script_text=inputs.get("script_text") or self._read_text_file(
                     inputs.get("script_path")
                 ),
@@ -2383,6 +2387,7 @@ class VideoCompose(BaseTool):
         proposal_packet: dict[str, Any] | None = None,
         narration_transcript_path: str | Path | None = None,
         script_text: str | None = None,
+        asset_manifest: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run post-render self-review and produce a final_review artifact.
 
@@ -2749,6 +2754,12 @@ class VideoCompose(BaseTool):
         )
         issues.extend(transcript_comparison.get("issues", []))
 
+        # --- 6b. Honesty guard (topic-tutorial): fixtures never count as real ---
+        from lib.honesty_guard import honesty_check
+
+        honesty = honesty_check(edit_decisions, asset_manifest)
+        issues.extend(honesty["issues"])
+
         # --- 7. Determine overall status ---
         critical_issues = [
             i for i in issues
@@ -2773,6 +2784,10 @@ class VideoCompose(BaseTool):
             status = "fail"
             recommended_action = "re_render"
 
+        if honesty["blocking"]:
+            status = "fail"
+            recommended_action = "replace_test_assets"
+
         final_review = {
             "version": "1.0",
             "output_path": str(output_path),
@@ -2784,6 +2799,7 @@ class VideoCompose(BaseTool):
                 "promise_preservation": promise_preservation,
                 "subtitle_check": subtitle_check,
                 "transcript_comparison": transcript_comparison,
+                "honesty_guard": honesty,
             },
             "issues_found": issues,
             "recommended_action": recommended_action,

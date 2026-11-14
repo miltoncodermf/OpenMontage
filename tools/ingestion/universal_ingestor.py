@@ -1,13 +1,12 @@
 """Universal Input Ingestor for OpenMontage topic-tutorial pipeline.
 
-Normalizes supported local files, directories, repositories, URLs, and media
-into a provenance-aware source bundle with SHA-256 hashes, secret redaction,
+Normalizes the supported topic-tutorial inputs (code repositories, markdown/text,
+PDFs with a text layer, and public URLs) into a provenance-aware source bundle with SHA-256 hashes, secret redaction,
 and fact extraction.
 """
 
 from __future__ import annotations
 
-import csv
 import fnmatch
 import hashlib
 import ipaddress
@@ -15,7 +14,6 @@ import json
 import os
 import re
 import socket
-import subprocess
 import time
 import urllib.parse
 from pathlib import Path
@@ -33,9 +31,6 @@ from tools.base_tool import (
     ToolStatus,
     ToolTier,
 )
-
-# Media file extensions exempt from in-memory byte loading
-MEDIA_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".wav", ".mp3", ".m4a", ".aac"}
 
 # Secret file and pattern regexes
 SECRET_FILE_PATTERNS = [
@@ -132,7 +127,7 @@ class UniversalIngestor(BaseTool):
         "local_file_ingestion",
         "directory_scan",
         "code_repository_ingestion",
-        "document_extraction",
+        "pdf_text_extraction",
         "secret_redaction",
         "provenance_tracking",
     ]
@@ -142,18 +137,13 @@ class UniversalIngestor(BaseTool):
         "text": True,
         "code": True,
         "pdf": True,
-        "docx": True,
-        "pptx": True,
-        "xlsx": True,
-        "csv": True,
         "urls": True,
-        "media": True,
     }
 
     best_for = [
         "universal material intake for tutorial and explainer pipelines",
         "codebase and documentation extraction with secret redaction",
-        "multi-format research asset bundling",
+        "repo, URL and PDF research intake (no office/media formats in v3)",
     ]
 
     input_schema = {
@@ -259,7 +249,7 @@ class UniversalIngestor(BaseTool):
                 if (
                     src.get("status") == "supported"
                     and src.get("content")
-                    and src.get("file_type") in {"text", "pdf", "docx", "pptx", "url"}
+                    and src.get("file_type") in {"text", "pdf", "url"}
                 ):
                     extracted = self._extract_facts(src["content"], src["source_id"])
                     for fact in extracted:
@@ -450,49 +440,6 @@ class UniversalIngestor(BaseTool):
         suffix = path.suffix.lower()
         byte_size = path.stat().st_size
 
-        # 3. Media files: exempt from max_file_size_bytes (allow up to 2GB) and avoid reading into RAM
-        if suffix in MEDIA_SUFFIXES:
-            if byte_size > 2 * 1024 * 1024 * 1024:
-                return {
-                    "source_id": source_id,
-                    "file_path": rel_str,
-                    "filename": filename,
-                    "status": "unsupported",
-                    "error": f"Media size ({byte_size} bytes) exceeds 2GB ceiling",
-                    "sha256": None,
-                    "word_count": 0,
-                    "byte_size": byte_size,
-                    "content": "",
-                }
-            try:
-                sha256_hash = _hash_file_stream(path)
-                media_meta = self._probe_media(path)
-                return {
-                    "source_id": source_id,
-                    "file_path": rel_str,
-                    "filename": filename,
-                    "file_type": "media",
-                    "status": "supported",
-                    "sha256": sha256_hash,
-                    "metadata": media_meta,
-                    "word_count": 0,
-                    "byte_size": byte_size,
-                    "summary": f"Media file: duration={media_meta.get('duration_s', 0)}s, format={suffix.lstrip('.')}",
-                    "content": f"Media file {filename} (Duration: {media_meta.get('duration_s')}s, Codec: {media_meta.get('codec')})",
-                }
-            except Exception as exc:
-                return {
-                    "source_id": source_id,
-                    "file_path": rel_str,
-                    "filename": filename,
-                    "status": "unsupported",
-                    "error": f"Media probe error: {exc}",
-                    "sha256": None,
-                    "word_count": 0,
-                    "byte_size": byte_size,
-                    "content": "",
-                }
-
         # 4. Check size for documents and code
         if byte_size > max_file_size_bytes:
             return {
@@ -614,143 +561,6 @@ class UniversalIngestor(BaseTool):
                         "content": "",
                     }
 
-            # Word (.docx)
-            if suffix == ".docx":
-                try:
-                    import docx
-                    doc = docx.Document(path)
-                    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-                    full_text = "\n".join(paragraphs)
-                    full_text = _redact_secrets(full_text)
-                    return {
-                        "source_id": source_id,
-                        "file_path": rel_str,
-                        "filename": filename,
-                        "file_type": "docx",
-                        "status": "supported",
-                        "sha256": sha256_hash,
-                        "word_count": len(full_text.split()),
-                        "byte_size": byte_size,
-                        "summary": full_text[:200].replace("\n", " ") + "...",
-                        "content": full_text,
-                    }
-                except Exception as exc:
-                    return {
-                        "source_id": source_id,
-                        "file_path": rel_str,
-                        "filename": filename,
-                        "file_type": "docx",
-                        "status": "unsupported",
-                        "error": f"DOCX parse error: {exc}",
-                        "sha256": sha256_hash,
-                        "word_count": 0,
-                        "byte_size": byte_size,
-                        "content": "",
-                    }
-
-            # PowerPoint (.pptx)
-            if suffix == ".pptx":
-                try:
-                    from pptx import Presentation
-                    prs = Presentation(path)
-                    slide_texts = []
-                    for idx, slide in enumerate(prs.slides):
-                        slide_parts = []
-                        for shape in slide.shapes:
-                            if hasattr(shape, "text") and shape.text.strip():
-                                slide_parts.append(shape.text.strip())
-                        if slide_parts:
-                            slide_texts.append(f"--- Slide {idx + 1} ---\n" + "\n".join(slide_parts))
-                    full_text = "\n\n".join(slide_texts)
-                    full_text = _redact_secrets(full_text)
-                    return {
-                        "source_id": source_id,
-                        "file_path": rel_str,
-                        "filename": filename,
-                        "file_type": "pptx",
-                        "slides_count": len(prs.slides),
-                        "status": "supported",
-                        "sha256": sha256_hash,
-                        "word_count": len(full_text.split()),
-                        "byte_size": byte_size,
-                        "summary": full_text[:200].replace("\n", " ") + "...",
-                        "content": full_text,
-                    }
-                except Exception as exc:
-                    return {
-                        "source_id": source_id,
-                        "file_path": rel_str,
-                        "filename": filename,
-                        "file_type": "pptx",
-                        "status": "unsupported",
-                        "error": f"PPTX parse error: {exc}",
-                        "sha256": sha256_hash,
-                        "word_count": 0,
-                        "byte_size": byte_size,
-                        "content": "",
-                    }
-
-            # Excel (.xlsx) & CSV (.csv)
-            if suffix == ".csv":
-                text = raw_bytes.decode("utf-8", errors="replace")
-                text = _redact_secrets(text)
-                reader = list(csv.reader(text.splitlines()))
-                return {
-                    "source_id": source_id,
-                    "file_path": rel_str,
-                    "filename": filename,
-                    "file_type": "csv",
-                    "rows_count": len(reader),
-                    "status": "supported",
-                    "sha256": sha256_hash,
-                    "word_count": len(text.split()),
-                    "byte_size": byte_size,
-                    "summary": f"CSV dataset with {len(reader)} rows",
-                    "content": text[:10000],
-                }
-
-            if suffix == ".xlsx":
-                try:
-                    import openpyxl
-                    wb = openpyxl.load_workbook(path, data_only=True)
-                    sheet_texts = []
-                    for sheet in wb.sheetnames:
-                        ws = wb[sheet]
-                        rows = []
-                        for row in ws.iter_rows(values_only=True):
-                            non_empty = [str(cell) for cell in row if cell is not None]
-                            if non_empty:
-                                rows.append(" | ".join(non_empty))
-                        if rows:
-                            sheet_texts.append(f"--- Sheet: {sheet} ---\n" + "\n".join(rows[:100]))
-                    full_text = "\n\n".join(sheet_texts)
-                    full_text = _redact_secrets(full_text)
-                    return {
-                        "source_id": source_id,
-                        "file_path": rel_str,
-                        "filename": filename,
-                        "file_type": "xlsx",
-                        "status": "supported",
-                        "sha256": sha256_hash,
-                        "word_count": len(full_text.split()),
-                        "byte_size": byte_size,
-                        "summary": f"Excel workbook ({len(wb.sheetnames)} sheets)",
-                        "content": full_text,
-                    }
-                except Exception as exc:
-                    return {
-                        "source_id": source_id,
-                        "file_path": rel_str,
-                        "filename": filename,
-                        "file_type": "xlsx",
-                        "status": "unsupported",
-                        "error": f"XLSX parse error: {exc}",
-                        "sha256": sha256_hash,
-                        "word_count": 0,
-                        "byte_size": byte_size,
-                        "content": "",
-                    }
-
             return {
                 "source_id": source_id,
                 "file_path": rel_str,
@@ -865,27 +675,6 @@ class UniversalIngestor(BaseTool):
                 "byte_size": 0,
                 "content": "",
             }
-
-    def _probe_media(self, path: Path) -> dict[str, Any]:
-        try:
-            cmd = [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration,size:stream=codec_name,width,height",
-                "-of", "json", str(path)
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            info = json.loads(res.stdout)
-            fmt = info.get("format", {})
-            streams = info.get("streams", [{}])
-            stream0 = streams[0] if streams else {}
-            return {
-                "duration_s": round(float(fmt.get("duration", 0)), 2),
-                "codec": stream0.get("codec_name", "unknown"),
-                "width": stream0.get("width"),
-                "height": stream0.get("height"),
-            }
-        except Exception:
-            return {"duration_s": 0.0, "codec": "unknown"}
 
     def _extract_facts(self, text: str, source_id: str) -> list[dict[str, Any]]:
         facts: list[dict[str, Any]] = []

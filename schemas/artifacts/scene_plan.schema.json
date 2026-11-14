@@ -118,7 +118,7 @@
           "type": "object",
           "properties": {
             "enabled": { "type": "boolean" },
-            "preferred_source": { "type": "string", "enum": ["recorded_video", "gemini_avatar", "local_lipsync", "cloud_avatar", "none"] },
+            "preferred_source": { "type": "string", "enum": ["twin_auto", "twin_hybrid", "twin_local", "none"] },
             "fallback": { "type": "string", "enum": ["visual_explainer", "diagram", "none"] },
             "pip_allowed": { "type": "boolean" }
           }

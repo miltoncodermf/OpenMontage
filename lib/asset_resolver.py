@@ -33,7 +33,7 @@ class AssetResolver:
         self,
         scene_plan: dict[str, Any],
         narration_items: list[dict[str, Any]],
-        presenter_video_path: Path | str | None = None,
+        presenter_asset: dict[str, Any] | None = None,
         screenshot_path: Path | str | None = None,
         screen_demo_path: Path | str | None = None,
     ) -> dict[str, Any]:
@@ -77,33 +77,18 @@ class AssetResolver:
                 "actual_cost_usd": 0.0,
             })
 
-        # 2. Resolve presenter video asset if supplied or present in project
-        cand_presenter = None
-        if presenter_video_path and Path(presenter_video_path).is_file():
-            cand_presenter = Path(presenter_video_path)
-        else:
-            # Check inputs/presenter/ or assets/presenter/
-            for p_dir in [self.project_dir / "inputs" / "presenter", self.presenter_dir]:
-                if p_dir.is_dir():
-                    vids = list(p_dir.glob("*.mp4")) + list(p_dir.glob("*.mov"))
-                    if vids:
-                        cand_presenter = vids[0]
-                        break
+        # 2. Presenter: only a guard-validated digital-twin asset (beautified, from a
+        #    presenter profile) is registered. Raw owner recordings are never rendered (D3).
+        #    If none is supplied the video simply has no presenter (D2).
+        if presenter_asset is not None:
+            from lib.presenter_guard import assert_real_presenter_asset
 
-        if cand_presenter and cand_presenter.is_file():
-            from tools.presenters.recorded_video_provider import RecordedVideoProvider
-            rec_provider = RecordedVideoProvider()
-            out_presenter = self.presenter_dir / cand_presenter.name
-            rec_res = rec_provider.execute({
-                "video_path": str(cand_presenter),
-                "output_path": str(out_presenter),
-                "sync_mode": "external_driving_audio",
-            })
-            if rec_res.success and rec_res.data.get("asset"):
-                rec_asset = rec_res.data["asset"]
-                rel_path = str(Path(rec_asset["path"]).relative_to(self.project_dir)) if Path(rec_asset["path"]).is_relative_to(self.project_dir) else rec_asset["path"]
-                rec_asset["path"] = rel_path
-                manifest_assets.append(rec_asset)
+            assert_real_presenter_asset(presenter_asset)
+            record = dict(presenter_asset)
+            p_path = Path(record["path"])
+            if p_path.is_absolute() and p_path.is_relative_to(self.project_dir):
+                record["path"] = str(p_path.relative_to(self.project_dir))
+            manifest_assets.append(record)
 
         # 3. Resolve screenshot asset if present
         cand_screenshot = None
@@ -190,7 +175,6 @@ class AssetResolver:
             "actual_total_cost_usd": 0.0,
             "provider_usage": [
                 {"provider": "mlx_tts", "cost_usd": 0.0, "runtime": "local"},
-                {"provider": "recorded_video", "cost_usd": 0.0, "runtime": "local"},
                 {"provider": "diagram_gen", "cost_usd": 0.0, "runtime": "local"},
                 {"provider": "screenshot_import", "cost_usd": 0.0, "runtime": "local"},
             ],
