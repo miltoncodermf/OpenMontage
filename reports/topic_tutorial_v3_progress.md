@@ -90,3 +90,12 @@ Not verified / not run:
 
 Acceptance (fast): guard rejects a raw recording passed as presenter (tiny generated clip), profile lock/verify/tamper, recording validation, voice recipes/page/profile, paid-call refusal, mocked Gemini flow → `tests/contracts/test_topic_tutorial.py` 77 passed; `tests/contracts` all green.
 Pending 🛑: owner recording session → identity pick → voice pick; first paid Gemini image call.
+
+## Phase 5 — Twin bake-off — tooling only; bake-off NOT RUN (blocked on 🛑)
+
+See `reports/twin_bakeoff.md` (status NOT RUN, with the blocker table and protocol). No clip was produced, no Gemini call made, no weights downloaded.
+
+Done (code, fast-tested): `twin_idle_loop` (plan / guarded generate / Flow import / seam check / motion source), `twin_lipsync` (looping + ping-pong, resumable per-segment outputs, raw-source refusal; MuseTalk-MLX and LatentSync adapters that fail loudly — pre/post-processing not integrated), `twin_performance_transfer` (LivePortrait; contract and honest status only), `presenter_matte` (ProRes 4444 alpha via injectable segmenter; real BiRefNet unavailable — `rembg` not installed), `lib/twin_media.py`, `lib/twin_backends.py`, `lib/bakeoff.py`. The tools are listed in the manifest's assets stage.
+
+Acceptance (fast): loop seam check, loop/ping-pong durations, resumable segments, raw-source refusal, alpha output, paid-call guard → `tests/contracts/test_topic_tutorial.py` 87 passed; `tests/contracts` 1644 passed, 9 skipped.
+Pending 🛑: first paid idle-loop call (and Flow fallback if the API fails), model downloads ≥ 500 MB, owner's default-engine pick.

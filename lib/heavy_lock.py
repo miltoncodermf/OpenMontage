@@ -29,7 +29,8 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def current_holder(path: Path = LOCK_PATH) -> dict | None:
+def current_holder(path: Path | None = None) -> dict | None:
+    path = Path(path) if path else LOCK_PATH
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -38,9 +39,9 @@ def current_holder(path: Path = LOCK_PATH) -> dict | None:
 
 
 @contextmanager
-def heavy_job(label: str, path: Path = LOCK_PATH):
+def heavy_job(label: str, path: Path | None = None):
     """Hold the heavy-job lock; raises HeavyJobBusy if another live job holds it."""
-    path = Path(path)
+    path = Path(path) if path else LOCK_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     holder = current_holder(path)
     if holder and holder["pid"] != os.getpid():

@@ -163,6 +163,12 @@ stages:
       - code_snippet
       - direct_clip_search
       - sandbox_capture
+      - presenter_profile
+      - twin_identity
+      - twin_idle_loop
+      - twin_performance_transfer
+      - twin_lipsync
+      - presenter_matte
       - threejs_world
     checkpoint_required: false
     human_approval_default: true

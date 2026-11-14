@@ -1550,3 +1550,182 @@ class TestV3TwinIdentityGuards:
             assert res.success and "unavailable" in res.data["face_detection"]
             assert len(res.data["stills"]) == 4
         assert not (d / "identity" / "refs" / "_all").exists()
+
+
+# ---------------------------------------------------------------------------
+# v3 fast checks (P5): twin media plumbing, resumable lip-sync, matte, idle loop guards
+# ---------------------------------------------------------------------------
+
+
+def _moving_clip(path: Path, seconds=2.0, seamless=False, size="160x90"):
+    import subprocess
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if seamless:
+        src = "color=c=gray:size=%s:rate=30:duration=%s" % (size, seconds)
+    else:  # a bright bar sweeping across the frame: first and last frames clearly differ
+        src = "color=c=black:size=%s:rate=30:duration=%s,geq=lum='255*lt(abs(X-W*T/%s),14)'" % (size, seconds, seconds)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", src, "-pix_fmt", "yuv420p", str(path)], check=True)
+    return path
+
+
+class TestV3TwinMedia:
+    def test_seam_score_distinguishes_static_from_moving(self, tmp_path):
+        from lib import twin_media
+
+        assert twin_media.is_seamless(_moving_clip(tmp_path / "s.mp4", seamless=True))
+        assert not twin_media.is_seamless(_moving_clip(tmp_path / "m.mp4", seamless=False))
+
+    def test_loop_to_duration_modes(self, tmp_path):
+        from lib import twin_media
+
+        moving = _moving_clip(tmp_path / "m.mp4", seconds=1.0)
+        res = twin_media.loop_to_duration(moving, tmp_path / "o.mp4", 3.0)
+        assert res["mode"] == "pingpong"
+        assert abs(twin_media.probe(tmp_path / "o.mp4")["duration_seconds"] - 3.0) < 0.15
+        still = _moving_clip(tmp_path / "s.mp4", seconds=1.0, seamless=True)
+        res = twin_media.loop_to_duration(still, tmp_path / "o2.mp4", 2.5)
+        assert res["mode"] == "loop" and abs(twin_media.probe(tmp_path / "o2.mp4")["duration_seconds"] - 2.5) < 0.15
+        with pytest.raises(ValueError):
+            twin_media.loop_to_duration(still, tmp_path / "x.mp4", 1.0, mode="bogus")
+
+    def test_bakeoff_measure_command(self):
+        from lib.bakeoff import measure_command
+
+        r = measure_command(["python3", "-c", "x=[0]*10**6"])
+        assert r["returncode"] == 0 and r["wall_seconds"] >= 0 and r["peak_rss_mb"] > 0
+
+
+class TestV3TwinLipsync:
+    class FakeBackend:
+        name = "fake"
+
+        def __init__(self):
+            self.calls = []
+
+        def lipsync(self, motion_video, audio, out):
+            import subprocess
+
+            self.calls.append(out.name)
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(motion_video), "-i", str(audio), "-shortest",
+                            "-c:v", "libx264", "-c:a", "aac", str(out)], check=True)
+
+    def _audio(self, path, seconds):
+        import subprocess
+
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"sine=frequency=300:duration={seconds}", str(path)], check=True)
+        return path
+
+    def test_segments_loop_resume_and_progress(self, tmp_path, monkeypatch):
+        from lib import twin_media
+        from tools.presenters.twin_lipsync import TwinLipsync
+
+        import lib.heavy_lock as hl
+        monkeypatch.setattr(hl, "LOCK_PATH", tmp_path / "lock")
+        motion = _moving_clip(tmp_path / "idle.mp4", seconds=1.0)
+        a1, a2 = self._audio(tmp_path / "a1.wav", 2.0), self._audio(tmp_path / "a2.wav", 1.5)
+        tool = TwinLipsync()
+        backend = self.FakeBackend()
+        monkeypatch.setattr(tool, "_backend", lambda name: backend)
+        inputs = {"motion_source": str(motion), "output_dir": str(tmp_path / "out"),
+                  "segments": [{"segment_id": "s1", "audio": str(a1)}, {"segment_id": "s2", "audio": str(a2)}]}
+        res = tool.execute(inputs)
+        assert res.success and [s["segment_id"] for s in res.data["segments"]] == ["s1", "s2"]
+        assert abs(twin_media.probe(tmp_path / "out" / "s1.mp4")["duration_seconds"] - 2.0) < 0.2
+        assert not list((tmp_path / "out").glob("*.motion.mp4"))
+        # rerun: everything resumes from progress.json, backend not called again
+        res2 = tool.execute(inputs)
+        assert res2.success and res2.data["resumed_skipped"] == ["s1", "s2"] and backend.calls == ["s1.mp4", "s2.mp4"]
+        # changed audio invalidates only that segment
+        a2b = self._audio(tmp_path / "a2.wav", 1.0)
+        res3 = tool.execute(inputs)
+        assert res3.data["resumed_skipped"] == ["s1"] and backend.calls[-1] == "s2.mp4" and a2b.exists()
+
+    def test_real_backends_fail_loudly_not_fake(self, tmp_path, monkeypatch):
+        import lib.heavy_lock as hl
+        from tools.presenters.twin_lipsync import TwinLipsync
+
+        monkeypatch.setattr(hl, "LOCK_PATH", tmp_path / "lock")
+        motion = _moving_clip(tmp_path / "idle.mp4")
+        a = self._audio(tmp_path / "a.wav", 1.0)
+        for backend in ("musetalk_mlx", "latentsync"):
+            res = TwinLipsync().execute({"backend": backend, "motion_source": str(motion), "output_dir": str(tmp_path / backend),
+                                         "segments": [{"segment_id": "s", "audio": str(a)}]})
+            assert res.success is False and "unavailable" in res.error.lower() or "not integrated" in res.error
+            assert not (tmp_path / backend / "s.mp4").exists()
+
+    def test_raw_motion_source_is_refused(self, profile_root, tmp_path):
+        from lib import presenter_profile as pp
+        from tools.presenters.twin_lipsync import TwinLipsync
+
+        d = pp.create_profile("owner")
+        raw = _moving_clip(d / "raw" / "performance.mp4")
+        res = TwinLipsync().execute({"motion_source": str(raw), "output_dir": str(tmp_path / "o"), "segments": []})
+        assert res.success is False and "raw" in res.error
+
+
+class TestV3PresenterMatte:
+    def test_alpha_mov_with_injected_segmenter(self, tmp_path, monkeypatch):
+        from PIL import Image
+        from lib import twin_media
+        from tools.presenters.presenter_matte import PresenterMatte
+
+        clip = _moving_clip(tmp_path / "p.mp4", seconds=0.5, size="160x90")
+
+        def fake_seg(im):
+            rgba = im.convert("RGBA")
+            a = Image.new("L", im.size, 0)
+            a.paste(255, (40, 10, 120, 80))
+            rgba.putalpha(a)
+            return rgba
+
+        tool = PresenterMatte()
+        monkeypatch.setattr(tool, "_segmenter", lambda: fake_seg)
+        res = tool.execute({"input_path": str(clip), "output_path": str(tmp_path / "p_alpha.mov")})
+        assert res.success, res.error
+        assert twin_media.probe(tmp_path / "p_alpha.mov")["has_alpha"] is True
+        assert tool.execute({"input_path": str(clip), "output_path": str(tmp_path / "p.mp4")}).success is False
+
+    def test_unavailable_backend_is_reported(self, tmp_path):
+        from tools.presenters.presenter_matte import PresenterMatte
+
+        clip = _moving_clip(tmp_path / "p.mp4", seconds=0.3)
+        from lib import twin_backends
+        if not twin_backends.birefnet_available()[0]:
+            res = PresenterMatte().execute({"input_path": str(clip), "output_path": str(tmp_path / "o.mov")})
+            assert res.success is False and "unavailable" in res.error
+
+
+class TestV3TwinIdleLoop:
+    def test_generate_requires_approval_and_guard_and_never_calls_api_unapproved(self, profile_root, monkeypatch):
+        from lib import presenter_profile as pp
+        from tools.presenters.twin_idle_loop import TwinIdleLoop
+
+        d = pp.create_profile("owner")
+        (d / "identity" / "canonical.png").write_bytes(b"x")
+        t = TwinIdleLoop()
+        monkeypatch.setattr(t, "_omni", lambda: pytest.fail("API must not be called"))
+        monkeypatch.setattr(t, "estimate_cost", lambda inputs: 1.5)
+        base = {"operation": "generate", "profile_id": "owner", "variant_id": "v1"}
+        assert "not approved" in t.execute(base).error
+        packet = {"approval": {"status": "approved"}, "cost_estimate": {"total_est_usd": 1.5, "paid_calls": []}}
+        res = t.execute({**base, "paid_call_approved": True, "proposal_packet": packet})
+        assert res.success is False and "paid-call guard" in res.error
+
+    def test_plan_import_flow_and_check_loop(self, profile_root, tmp_path, monkeypatch):
+        from lib import presenter_profile as pp
+        from tools.presenters.twin_idle_loop import TwinIdleLoop
+
+        d = pp.create_profile("owner")
+        (d / "identity" / "canonical.png").write_bytes(b"x")
+        t = TwinIdleLoop()
+        monkeypatch.setattr(t, "estimate_cost", lambda inputs: 1.5)
+        plan = t.execute({"operation": "plan", "profile_id": "owner", "variant_id": "v1"})
+        assert plan.success and plan.data["estimated_usd"] == 1.5 and "Flow" in plan.data["fallback"]
+        flow = _moving_clip(tmp_path / "flow.mp4", seconds=1.0, seamless=True)
+        imp = t.execute({"operation": "import_flow", "profile_id": "owner", "variant_id": "v1", "flow_clip": str(flow)})
+        assert imp.success and imp.data["seamless"] is True
+        assert t.execute({"operation": "check_loop", "profile_id": "owner", "variant_id": "v1"}).data["seamless"] is True
+        ms = t.execute({"operation": "make_motion_source", "profile_id": "owner", "variant_id": "v1",
+                        "output_path": str(tmp_path / "m.mp4"), "duration_s": 2.0})
+        assert ms.success and ms.data["mode"] == "loop"
