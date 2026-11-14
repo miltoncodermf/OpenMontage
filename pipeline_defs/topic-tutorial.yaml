@@ -159,6 +159,8 @@ stages:
       - diagram_gen
       - screenshot_import
       - screen_recording_import
+      - script_aligner
+      - transcriber
       - alignment_provider
       - code_snippet
       - direct_clip_search

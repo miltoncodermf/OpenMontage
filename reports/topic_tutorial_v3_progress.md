@@ -99,3 +99,20 @@ Done (code, fast-tested): `twin_idle_loop` (plan / guarded generate / Flow impor
 
 Acceptance (fast): loop seam check, loop/ping-pong durations, resumable segments, raw-source refusal, alpha output, paid-call guard → `tests/contracts/test_topic_tutorial.py` 87 passed; `tests/contracts` 1644 passed, 9 skipped.
 Pending 🛑: first paid idle-loop call (and Flow fallback if the API fails), model downloads ≥ 500 MB, owner's default-engine pick.
+
+## Phase 6 — Productionize twin + assets stage (code complete; no real twin run)
+
+Done:
+- **Alignment (D22):** `lib/script_alignment.py` + tool `script_aligner`: faster-whisper word times (through `transcriber`) anchored onto the known script tokens (numbers/punctuation map back via the gap between neighbouring anchors); falls back to the energy heuristic with `alignment_method: heuristic` + `fallback_reason`. **Deviation from spec, stated plainly:** whisperX is not installed in this repo (the "existing transcriber" is faster-whisper), so the primary method is named `asr_anchored`, not `forced`; manifest enum is `forced | asr_anchored | heuristic`. Log it as an `alignment_method` decision.
+- `tools/analysis/transcriber.py`: pre-decodes audio with ffmpeg because faster-whisper 1.2.1 needs a newer PyAV than this venv has (`open() got an unexpected keyword argument 'metadata_errors'`). I `pip install`ed `faster-whisper` into `.venv` (small; models were already in the HF cache; not added to requirements files).
+- **Scene cache hash** (`lib/scene_cache.py`): now includes sha256 of every referenced input asset, renderer version (hash of `remotion-composer/src` + package version), TTS model, voice-profile hash, aspect (`collect_input_hashes`, `renderer_version`). Backward compatible defaults.
+- **Presenter QA** (`lib/presenter_qa.py`): face-presence ≥ 98 %, mouth–audio offset ±2 frames (cross-correlation), no frame identical to `raw/` (16×16 dHash, distance ≤ 6/256), identity guard. Providers for face detection / mouth landmarks are injectable; with none installed (MediaPipe missing) those checks report `not_run`, and `not_run` never counts as a pass (`verdict: incomplete`).
+- **No-presenter fallback** (`lib/presenter_fallback.py`): presenter beats re-planned to diagram beats, policy disabled, `presenter_status: skipped_failed` + reason; result is schema-valid and compiles with 0 % presenter.
+- Resumable segments: `twin_lipsync` writes per-segment outputs + `progress.json` keyed by (motion hash, audio hash, backend); the asset skill tells the agent to refresh checkpoint `partial_progress` per unit.
+- Skills updated (`asset-director`).
+
+Real run evidence: Kokoro narration (10 s) → `script_aligner` with faster-whisper `base` on CPU: `asr_anchored`, 91.3 % of 23 script tokens matched, 1.2 s.
+
+Not run: any real twin segment, real face/mouth QA (no MediaPipe), real overnight resume with a backend.
+
+Acceptance (fast): alignment (numbers/punctuation, fallback flags), cache invalidation per field, QA math + raw-frame detection + not_run semantics, fallback re-plan, aligner tool → `tests/contracts/test_topic_tutorial.py` 99 passed; `tests/contracts` all green.

@@ -1729,3 +1729,208 @@ class TestV3TwinIdleLoop:
         ms = t.execute({"operation": "make_motion_source", "profile_id": "owner", "variant_id": "v1",
                         "output_path": str(tmp_path / "m.mp4"), "duration_s": 2.0})
         assert ms.success and ms.data["mode"] == "loop"
+
+
+# ---------------------------------------------------------------------------
+# v3 fast checks (P6): alignment, cache hash, presenter QA, no-presenter fallback
+# ---------------------------------------------------------------------------
+
+
+class TestV3ScriptAlignment:
+    ASR = [
+        {"word": "Welcome", "start": 0.1, "end": 0.5}, {"word": "to", "start": 0.5, "end": 0.6},
+        {"word": "twenty", "start": 0.9, "end": 1.2}, {"word": "four", "start": 1.2, "end": 1.5},
+        {"word": "cores", "start": 1.5, "end": 2.0},
+    ]
+
+    def test_numbers_and_punctuation_map_back_to_script_tokens(self):
+        from lib.script_alignment import align_script_to_asr
+
+        res = align_script_to_asr("Welcome to 24 cores.", self.ASR, 2.2)
+        ts = res["timestamps"]
+        assert [t["word"] for t in ts] == ["Welcome", "to", "24", "cores."]
+        assert ts[2]["startMs"] == 900.0 and ts[2]["endMs"] == 1500.0  # spans the ASR words "twenty four"
+        assert res["matched_ratio"] == 0.75 and res["method"] == "asr_anchored"
+        prev = 0.0
+        for t in ts:  # monotonic, non-overlapping, inside audio
+            assert t["startMs"] >= prev - 1e-6 and t["endMs"] > t["startMs"] and t["endMs"] <= 2250
+            prev = t["endMs"]
+
+    def test_confident_asr_is_primary_and_low_confidence_falls_back_flagged(self):
+        from lib.script_alignment import align_narration
+
+        heur = lambda a, t, d: [{"word": w, "startMs": i * 100.0, "endMs": i * 100.0 + 90} for i, w in enumerate(t.split())]
+        ok = align_narration("a.wav", "Welcome to 24 cores.", 2.2, lambda p: self.ASR, heur)
+        assert ok["alignment_method"] == "asr_anchored" and ok["fallback_reason"] is None
+        bad = align_narration("a.wav", "completely different words entirely here", 2.2, lambda p: self.ASR, heur)
+        assert bad["alignment_method"] == "heuristic" and "low confidence" in bad["fallback_reason"]
+
+        def boom(p):
+            raise RuntimeError("no model")
+
+        un = align_narration("a.wav", "hello world", 1.0, boom, heur)
+        assert un["alignment_method"] == "heuristic" and "ASR unavailable" in un["fallback_reason"]
+        assert align_narration("a.wav", "hello", 1.0, None, heur)["fallback_reason"] == "ASR not provided"
+
+    def test_alignment_method_enum_in_asset_manifest(self):
+        from schemas.artifacts import validate_artifact
+
+        for m in ("forced", "asr_anchored", "heuristic"):
+            validate_artifact("asset_manifest", {"version": "2.0", "assets": [{"asset_id": "n", "asset_type": "narration", "path": "a.wav", "alignment_method": m}]})
+
+
+class TestV3SceneCacheHash:
+    BASE = dict(scene_id="s1", narration_text="hi", scene_props={"a": 1}, style_name="x", duration_s=5.0, voice="v", speed=1.0)
+
+    def _h(self, **kw):
+        return compute_scene_hash(**{**self.BASE, **kw})
+
+    def test_each_new_field_invalidates(self):
+        base = self._h(input_asset_hashes={"clip.mp4": "a" * 64}, renderer_version="r1", tts_model="kokoro", voice_profile_hash="p1", aspect="16:9")
+        same = self._h(input_asset_hashes={"clip.mp4": "a" * 64}, renderer_version="r1", tts_model="kokoro", voice_profile_hash="p1", aspect="16:9")
+        assert base == same
+        variants = [
+            dict(input_asset_hashes={"clip.mp4": "b" * 64}),
+            dict(input_asset_hashes={"clip.mp4": "a" * 64, "other.png": "c" * 64}),
+            dict(renderer_version="r2"), dict(tts_model="chatterbox"), dict(voice_profile_hash="p2"), dict(aspect="9:16"),
+        ]
+        full = dict(input_asset_hashes={"clip.mp4": "a" * 64}, renderer_version="r1", tts_model="kokoro", voice_profile_hash="p1", aspect="16:9")
+        hashes = {self._h(**{**full, **v}) for v in variants}
+        assert base not in hashes and len(hashes) == len(variants)
+
+    def test_input_hash_collection_and_renderer_version(self, tmp_path):
+        from lib.scene_cache import collect_input_hashes, renderer_version
+
+        (tmp_path / "assets").mkdir()
+        (tmp_path / "assets" / "clip.mp4").write_bytes(b"one")
+        props = {"presenterVideo": "assets/clip.mp4", "title": "no file", "nested": [{"img": "assets/missing.png"}]}
+        h1 = collect_input_hashes(props, tmp_path)
+        assert list(h1) == ["assets/clip.mp4"]
+        (tmp_path / "assets" / "clip.mp4").write_bytes(b"two")
+        assert collect_input_hashes(props, tmp_path) != h1
+        comp = tmp_path / "comp" / "src"
+        comp.mkdir(parents=True)
+        (comp / "A.tsx").write_text("export const A=1")
+        v1 = renderer_version(tmp_path / "comp")
+        (comp / "A.tsx").write_text("export const A=2")
+        assert renderer_version(tmp_path / "comp") != v1
+        assert len(renderer_version()) == 16  # the real remotion-composer tree
+
+
+class TestV3PresenterQA:
+    def test_offset_estimation_and_envelope_math(self):
+        import numpy as np
+        from lib.presenter_qa import estimate_offset_frames
+
+        rng = np.random.default_rng(1)
+        env = np.abs(rng.normal(size=200)) * (np.sin(np.arange(200) / 5) > 0)
+        assert estimate_offset_frames(env, env) == 0
+        assert estimate_offset_frames(np.roll(env, 3), env) == 3     # mouth lags audio by 3 frames
+        assert estimate_offset_frames(np.roll(env, -2), env) == -2
+
+    def test_raw_frame_match_is_detected_and_unrelated_passes(self, tmp_path):
+        from lib.presenter_qa import check_no_raw_frames
+
+        raw = _moving_clip(tmp_path / "raw.mp4", seconds=1.0, size="320x180")
+        copy_of_raw = tmp_path / "copy.mp4"
+        import shutil
+        shutil.copy2(raw, copy_of_raw)
+        assert check_no_raw_frames(copy_of_raw, [raw])["passed"] is False
+        other = _moving_clip(tmp_path / "other.mp4", seconds=1.0, seamless=True, size="320x180")
+        res = check_no_raw_frames(other, [raw])
+        assert res["status"] == "run" and res["passed"] is True
+        assert check_no_raw_frames(other, [])["status"] == "not_run"
+
+    def test_not_run_checks_never_count_as_pass(self, tmp_path):
+        from lib.presenter_qa import presenter_qa_report
+
+        clip = _moving_clip(tmp_path / "c.mp4", seconds=1.0, size="320x180")
+        audio = tmp_path / "a.wav"
+        import subprocess
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=1", str(audio)], check=True)
+        good = {"asset_id": "p", "asset_type": "presenter_video", "path": "assets/presenter/x.mp4", "identity_transform": "beautified", "profile_id": "owner"}
+        rep = presenter_qa_report(good, clip, audio, 30.0, [])
+        assert rep["passed"] is False and rep["verdict"] == "incomplete"
+        assert set(rep["not_run"]) == {"face_presence", "mouth_sync", "no_raw_frames"} and rep["failed"] == []
+        # with injected providers it can pass; a failing identity fails outright
+        rep2 = presenter_qa_report(good, clip, audio, 30.0, [], detector=lambda im: True,
+                                   mouth_series=lambda v: __import__("numpy").abs(__import__("numpy").sin(__import__("numpy").arange(30) / 3)))
+        assert rep2["checks"]["face_presence"]["passed"] is True and rep2["checks"]["identity"]["passed"] is True
+        bad = presenter_qa_report({**good, "identity_transform": "none"}, clip, audio, 30.0, [])
+        assert bad["verdict"] == "fail" and "identity" in bad["failed"]
+
+    def test_face_presence_threshold(self, tmp_path):
+        from lib.presenter_qa import check_face_presence
+
+        clip = _moving_clip(tmp_path / "c.mp4", seconds=2.0, size="160x90")
+        n = {"i": 0}
+
+        def det(_im):
+            n["i"] += 1
+            return n["i"] % 5 != 0  # 20 % missing
+
+        assert check_face_presence(clip, det)["passed"] is False
+        assert check_face_presence(clip, lambda im: True)["passed"] is True
+
+
+class TestV3NoPresenterFallback:
+    def _plan(self):
+        return {
+            "version": "2.0", "presenter_policy": {"enabled": True, "preferred_source": "twin_auto", "fallback": "visual_explainer", "pip_allowed": True},
+            "sections": [
+                {"section_id": "a", "script_section_id": "s1", "learning_objective": "Why it matters", "visual_beats": [
+                    {"beat_id": "b1", "visual_type": "presenter_fullscreen", "duration_hint_seconds": 5.0, "title": "Hook"}]},
+                {"section_id": "b", "script_section_id": "s2", "learning_objective": "How", "visual_beats": [
+                    {"beat_id": "b2", "visual_type": "diagram", "duration_hint_seconds": 4.0, "layout": {"preset": "diagram", "presenter_pip": True},
+                     "diagram_spec": {"title": "T", "nodes": ["A", "B"], "edges": [["A", "B"]]}},
+                    {"beat_id": "b3", "visual_type": "presenter_screen_split", "duration_hint_seconds": 3.0}]},
+            ],
+        }
+
+    def test_replan_removes_every_presenter_beat_and_stays_schema_valid(self):
+        from lib.presenter_fallback import replan_without_presenter
+        from schemas.artifacts import validate_artifact
+
+        plan = self._plan()
+        out = replan_without_presenter(plan, "twin failed QA: mouth_sync")
+        assert plan["presenter_policy"]["enabled"] is True  # input not mutated
+        beats = [b for s in out["sections"] for b in s["visual_beats"]]
+        assert not [b for b in beats if b["visual_type"].startswith("presenter_")]
+        assert not [b for b in beats if (b.get("layout") or {}).get("presenter_pip")]
+        assert all(b["visual_type"] == "diagram" and b["diagram_spec"] for b in beats)
+        assert [b["duration_hint_seconds"] for b in beats] == [5.0, 4.0, 3.0]
+        assert out["presenter_policy"]["enabled"] is False and out["presenter_policy"]["preferred_source"] == "none"
+        assert out["metadata"]["presenter_status"] == "skipped_failed" and "mouth_sync" in out["metadata"]["presenter_status_reason"]
+        assert out["metadata"]["presenter_beats_replanned"] == 3
+        validate_artifact("scene_plan", out)
+
+    def test_adapter_reports_zero_presenter_percentage_after_fallback(self):
+        from lib.presenter_fallback import replan_without_presenter
+        from tools.video.scene_plan_adapter import ScenePlanAdapter
+
+        out = replan_without_presenter(self._plan(), "failed")
+        compiled = ScenePlanAdapter().compile(out, {"assets": []}, [], {"s1": 5.0, "s2": 7.0})
+        assert compiled["visual_analytics"]["presenter_percentage"] == 0.0
+        assert compiled["visual_analytics"]["fixture_presenter_percentage"] == 0.0
+
+
+class TestV3ScriptAlignerTool:
+    def test_registered_and_heuristic_fallback_flagged(self, tmp_path, monkeypatch):
+        import subprocess
+        from tools.audio.script_aligner import ScriptAligner
+
+        registry.discover()
+        assert registry.get("script_aligner") is not None
+        wav = tmp_path / "a.wav"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=300:duration=2", str(wav)], check=True)
+        tool = ScriptAligner()
+
+        def boom(model_size):
+            def run(p):
+                raise RuntimeError("no asr")
+            return run
+
+        monkeypatch.setattr(tool, "_asr", boom)
+        res = tool.execute({"audio_path": str(wav), "text": "hello there general kenobi"})
+        assert res.success and res.data["alignment_method"] == "heuristic" and "ASR unavailable" in res.data["fallback_reason"]
+        assert len(res.data["timestamps"]) == 4
