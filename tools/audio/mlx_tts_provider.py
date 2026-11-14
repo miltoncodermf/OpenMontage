@@ -170,7 +170,7 @@ class MlxTTSProvider(BaseTool):
             sf.write(str(output_path), audio_data, sample_rate)
 
             duration_s = round(len(audio_data) / float(sample_rate), 3)
-            timestamps = self._build_word_timestamps(text, duration_s)
+            timestamps = self._build_word_timestamps(text, duration_s, audio_path=output_path)
             elapsed = round(time.time() - started, 2)
 
             return ToolResult(
@@ -243,8 +243,27 @@ class MlxTTSProvider(BaseTool):
             model="en_US-lessac-medium",
         )
 
-    def _build_word_timestamps(self, text: str, total_duration_s: float) -> list[dict[str, Any]]:
-        """Compute punctuation-aware word timestamps aligned to total audio duration."""
+    def _build_word_timestamps(
+        self, text: str, total_duration_s: float, audio_path: Path | str | None = None
+    ) -> list[dict[str, Any]]:
+        """Compute word timestamps.
+
+        Uses acoustic energy VAD alignment via AlignmentProvider when the synthesized audio
+        file is available. Falls back to character-length proxy duration modeling when
+        raw audio waveform is not provided.
+        """
+        if audio_path:
+            p = Path(audio_path)
+            if p.is_file():
+                try:
+                    from tools.audio.alignment_provider import AlignmentProvider
+                    aligner = AlignmentProvider()
+                    res = aligner.execute({"audio_path": str(p), "text": text})
+                    if res.success and res.data.get("timestamps"):
+                        return res.data["timestamps"]
+                except Exception as align_err:
+                    logger.debug("AlignmentProvider fallback: %s", align_err)
+
         words = text.split()
         if not words or total_duration_s <= 0:
             return []
@@ -255,7 +274,7 @@ class MlxTTSProvider(BaseTool):
 
         for idx, word in enumerate(words):
             clean = word.strip(".,!?:;\"'()-—")
-            # Base acoustic weight: syllable/character proxy
+            # Base heuristic weight: character proxy
             char_weight = max(1.5, float(len(clean)))
             # Add trailing pause weight for clause/sentence boundaries (except after the final word)
             pause_w = 0.0

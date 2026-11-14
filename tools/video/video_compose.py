@@ -926,7 +926,16 @@ class VideoCompose(BaseTool):
         """
 
         staged_by_source: dict[Path, str] = {}
-        media_keys = {"source", "src", "backgroundSrc", "backgroundImage", "backgroundVideo", "images"}
+        media_keys = {
+            "source",
+            "src",
+            "backgroundSrc",
+            "backgroundImage",
+            "backgroundVideo",
+            "images",
+            "presenterVideo",
+            "presenterSrc",
+        }
 
         def visit(node: Any, parent_key: str | None = None) -> Any:
             if isinstance(node, dict):
@@ -2706,10 +2715,17 @@ class VideoCompose(BaseTool):
                     # they may be burned in (which is fine — not a failure)
                     if (subtitle_check["subtitles_expected"]
                             and not subtitle_check["subtitles_present"]):
-                        # Check if subtitle_path was used (burned in)
+                        # Check if subtitle_path was used (burned in) or Remotion burned-in captions
                         sub_source = ed_subs.get("source")
-                        if sub_source and Path(sub_source).exists():
-                            # Burned-in subtitles are not detectable as streams
+                        is_burned_in = (
+                            (sub_source and Path(sub_source).exists())
+                            or ed_subs.get("format") == "burned_in_word_highlight"
+                            or ed_subs.get("style") in ("word-by-word", "karaoke", "sentence")
+                            or sub_source == "captions"
+                            or edit_decisions.get("render_runtime") == "remotion"
+                        )
+                        if is_burned_in:
+                            # Burned-in subtitles are not detectable as separate streams
                             subtitle_check["subtitles_present"] = True
                             subtitle_check["coverage_ratio"] = 1.0
                         else:

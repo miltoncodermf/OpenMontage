@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/reference_style_profile",
+  "title": "Reference Style Profile",
+  "description": "Style profile extracted from reference video analysis to guide visual grammar and pacing.",
+  "type": "object",
+  "required": ["version", "reference_url", "visual_grammar"],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "reference_url": { "type": "string" },
+    "analysis_date": { "type": "string" },
+    "chapters": { "type": "array" },
+    "shot_types": { "type": "array" },
+    "presenter_usage": {
+      "type": "object",
+      "properties": {
+        "full_screen_ratio_estimate": { "type": "number" },
+        "pip_usage": { "type": "string" },
+        "transitions": { "type": "string" }
+      }
+    },
+    "visual_grammar": {
+      "type": "object",
+      "properties": {
+        "diagram_types": { "type": "array", "items": { "type": "string" } },
+        "screen_demo_patterns": { "type": "array", "items": { "type": "string" } },
+        "callout_patterns": { "type": "array", "items": { "type": "string" } },
+        "broll_patterns": { "type": "array", "items": { "type": "string" } },
+        "typography_and_caption_notes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "pacing": {
+      "type": "object",
+      "properties": {
+        "typical_visual_beat_seconds": { "type": "array", "items": { "type": "number" } },
+        "chapter_transition_style": { "type": "string" }
+      }
+    },
+    "adaptation_rules": { "type": "array", "items": { "type": "string" } },
+    "copyright_note": { "type": "string" },
+    "metadata": { "type": "object" }
+  },
+  "additionalProperties": false
+}

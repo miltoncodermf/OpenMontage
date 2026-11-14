@@ -1,0 +1,85 @@
+import React from "react";
+import {
+  AbsoluteFill,
+  OffthreadVideo,
+  useVideoConfig,
+} from "remotion";
+import { resolveAsset } from "../lib/resolveAsset";
+
+export interface PresenterScreenSplitProps {
+  presenterSrc: string;
+  startFrom?: number;
+  presenterSide?: "left" | "right";
+  splitRatio?: number; // default 0.35 (35% presenter, 65% screen)
+  accentColor?: string;
+  children?: React.ReactNode;
+}
+
+export const PresenterScreenSplit: React.FC<PresenterScreenSplitProps> = ({
+  presenterSrc,
+  startFrom = 0,
+  presenterSide = "left",
+  splitRatio = 0.35,
+  accentColor = "#22D3EE",
+  children,
+}) => {
+  const { fps } = useVideoConfig();
+
+  const presenterWidth = `${splitRatio * 100}%`;
+  const screenWidth = `${(1 - splitRatio) * 100}%`;
+
+  return (
+    <AbsoluteFill
+      style={{
+        display: "flex",
+        flexDirection: presenterSide === "left" ? "row" : "row-reverse",
+        backgroundColor: "#0F172A",
+        overflow: "hidden",
+      }}
+    >
+      {/* Presenter Panel */}
+      <div
+        style={{
+          width: presenterWidth,
+          height: "100%",
+          position: "relative",
+          borderRight: presenterSide === "left" ? `2px solid ${accentColor}40` : undefined,
+          borderLeft: presenterSide === "right" ? `2px solid ${accentColor}40` : undefined,
+          overflow: "hidden",
+          backgroundColor: "#0B1120",
+        }}
+      >
+        <OffthreadVideo
+          src={resolveAsset(presenterSrc)}
+          startFrom={Math.round(startFrom * fps)}
+          muted
+          style={{
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+          }}
+        />
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            background: "linear-gradient(to top, rgba(11,17,32,0.6) 0%, transparent 20%)",
+            pointerEvents: "none",
+          }}
+        />
+      </div>
+
+      {/* Screen / Diagram Panel */}
+      <div
+        style={{
+          width: screenWidth,
+          height: "100%",
+          position: "relative",
+          overflow: "hidden",
+        }}
+      >
+        {children}
+      </div>
+    </AbsoluteFill>
+  );
+};

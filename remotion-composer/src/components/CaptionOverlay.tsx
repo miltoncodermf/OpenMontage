@@ -89,6 +89,7 @@ function buildPages(words: WordCaption[], wordsPerPage: number): CaptionPage[] {
 
 const PageRenderer: React.FC<{
   page: CaptionPage;
+  fromFrame?: number;
   fontSize: number;
   color: string;
   highlightColor: string;
@@ -98,11 +99,14 @@ const PageRenderer: React.FC<{
   direction: "ltr" | "rtl";
   bottomOffset: number;
   look: CaptionProps;
-}> = ({ page, fontSize, color, highlightColor, backgroundColor, fontFamily, wordSeparator, direction, bottomOffset, look }) => {
+}> = ({ page, fromFrame, fontSize, color, highlightColor, backgroundColor, fontFamily, wordSeparator, direction, bottomOffset, look }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  const currentMs = page.startMs + (frame / fps) * 1000;
+  // Use global frame time if fromFrame is known, keeping audio and word highlighting strictly frame-locked
+  const currentMs = fromFrame !== undefined
+    ? ((fromFrame + frame) / fps) * 1000
+    : page.startMs + (frame / fps) * 1000;
 
   // Spring entrance
   const entrance = spring({
@@ -144,7 +148,8 @@ const PageRenderer: React.FC<{
           }}
         >
           {page.words.map((w, i) => {
-            const isActive = w.startMs <= currentMs && w.endMs > currentMs;
+            // Strictly one word active at any given millisecond: startMs <= currentMs < endMs
+            const isActive = w.startMs <= currentMs && currentMs < w.endMs;
             const isPast = w.endMs <= currentMs;
             const pop = isActive && look.wordPop ? spring({ frame: Math.max(0, Math.round(((currentMs - w.startMs) / 1000) * fps)),
               fps, config: { damping: look.wordPop.damping ?? 12, stiffness: look.wordPop.stiffness ?? 220 } }) : undefined;
@@ -211,6 +216,7 @@ export const CaptionOverlay: React.FC<CaptionOverlayProps> = ({
           <Sequence key={i} from={fromFrame} durationInFrames={duration}>
             <PageRenderer
               page={page}
+              fromFrame={fromFrame}
               fontSize={fontSize}
               color={color}
               highlightColor={highlightColor}

@@ -33,6 +33,11 @@ import { ProviderChip } from "./components/ProviderChip";
 import { resolveAsset } from "./lib/resolveAsset";
 import type { ParticleType } from "./components/ParticleOverlay";
 import { resolveTheme, type ThemeConfig, DEFAULT_THEME } from "./Root";
+import { DiagramScene } from "./components/DiagramScene";
+import type { DiagramSpec } from "./components/DiagramScene";
+import { PresenterFullScreen } from "./components/PresenterFullScreen";
+import { PresenterPip } from "./components/PresenterPip";
+import { PresenterScreenSplit } from "./components/PresenterScreenSplit";
 
 // Load Space Grotesk font for cinematic typography
 const { fontFamily } = loadSpaceGrotesk(["400", "700"]);
@@ -266,6 +271,15 @@ interface Cut {
   screenshotSteps?: ScreenshotStep[];
   screenshotSize?: { width: number; height: number };
   cursorStartAt?: [number, number];
+  // Diagram props (type: "diagram")
+  diagramSpec?: DiagramSpec;
+  // Presenter props (type: "presenter_fullscreen", "presenter_screen_split", or presenterPip overlay)
+  presenterVideo?: string;
+  presenterStartFrom?: number;
+  presenterPip?: boolean | { position?: "bottom-right" | "bottom-left" | "top-right" | "top-left"; pipWidthPercent?: number; label?: string };
+  presenterLabel?: string;
+  splitRatio?: number;
+  presenterSide?: "left" | "right";
 }
 
 interface Overlay {
@@ -587,201 +601,262 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
     return element;
   };
 
-  // Resolve the scene element based on cut type, then wrap with backgroundImage if set
-  // Use transparent bg so the animated gradient background shows through
-  // When no explicit backgroundColor on the cut, inherit from theme
   const rawBg = (cut.backgroundImage || cut.backgroundVideo) ? "transparent" : (cut.backgroundColor || theme.surfaceColor);
   const bgColor = (rawBg === theme.backgroundColor || rawBg === "#0F172A" || rawBg === "#0f172a") ? "transparent" : rawBg;
   const textColor = cut.color || theme.textColor;
   const accent = cut.accentColor || theme.accentColor;
 
-  // Explicit component types — use theme-derived defaults for colors
-  if (cut.type === "text_card" && cut.text) {
-    return maybeWrapWithBg(
-      <TextCard text={cut.text} fontSize={cut.fontSize} color={textColor} backgroundColor={bgColor} />
-    );
-  }
-  if (cut.type === "stat_card" && cut.stat) {
-    return maybeWrapWithBg(
-      <StatCard stat={cut.stat} subtitle={cut.subtitle} accentColor={accent} backgroundColor={bgColor} />
-    );
-  }
-  if (cut.type === "callout" && cut.text) {
-    return maybeWrapWithBg(
-      <CalloutBox
-        text={cut.text} type={cut.callout_type} title={cut.title}
-        borderColor={accent} backgroundColor={cut.backgroundColor || theme.surfaceColor}
-        textColor={textColor} containerBackgroundColor={bgColor}
-        fontSize={cut.fontSize} titleFontSize={cut.titleFontSize}
-      />
-    );
-  }
-  if (cut.type === "comparison" && cut.leftLabel && cut.rightLabel && cut.leftValue && cut.rightValue) {
-    return maybeWrapWithBg(
-      <ComparisonCard
-        leftLabel={cut.leftLabel} rightLabel={cut.rightLabel}
-        leftValue={cut.leftValue} rightValue={cut.rightValue}
-        title={cut.title} backgroundColor={bgColor} textColor={textColor}
-        cardBackgroundColor={cut.cardBackgroundColor || theme.surfaceColor}
-      />
-    );
-  }
-  if (cut.type === "hero_title" && cut.text) {
-    return maybeWrapWithBg(
-      <HeroTitle
-        title={cut.text}
-        subtitle={cut.heroSubtitle || cut.subtitle}
-        accentColor={accent}
-        textColor={textColor}
-        subtitleColor={theme.mutedTextColor}
-        scrimBackground={heroScrim(theme)}
-      />
-    );
-  }
-  if (cut.type === "terminal_scene" && cut.steps) {
-    return maybeWrapWithBg(
-      <TerminalScene
-        title={cut.terminalTitle || "Terminal"}
-        steps={cut.steps as TerminalStep[]}
-        prompt={cut.prompt}
-        accentColor={accent}
-        backgroundColor={bgColor || theme.backgroundColor}
-      />
-    );
-  }
-  if (cut.type === "screenshot_scene" && cut.backgroundImage && cut.screenshotSteps) {
-    return (
-      <ScreenshotScene
-        backgroundImage={cut.backgroundImage}
-        backgroundSize={cut.screenshotSize}
-        steps={cut.screenshotSteps as ScreenshotStep[]}
-        accentColor={accent}
-        cursorStartAt={cut.cursorStartAt}
-      />
-    );
-  }
-
-  // --- Chart types — use theme.chartColors as default palette ---
-  if (cut.type === "bar_chart" && cut.chartData) {
-    return maybeWrapWithBg(
-      <BarChart
-        data={cut.chartData} title={cut.title} colors={cut.chartColors || theme.chartColors}
-        animationStyle={(cut.chartAnimation as any) || "grow-up"}
-        showGrid={cut.showGrid} showValues={cut.showValues} backgroundColor={bgColor}
-        textColor={textColor}
-      />
-    );
-  }
-  if (cut.type === "line_chart" && cut.chartSeries) {
-    return maybeWrapWithBg(
-      <LineChart
-        series={cut.chartSeries} title={cut.title} colors={cut.chartColors || theme.chartColors}
-        animationStyle={(cut.chartAnimation as any) || "draw"}
-        showGrid={cut.showGrid} showMarkers={cut.showMarkers} showLegend={cut.showLegend}
-        xLabel={cut.xLabel} yLabel={cut.yLabel} backgroundColor={bgColor}
-        textColor={textColor}
-      />
-    );
-  }
-  if (cut.type === "pie_chart" && cut.chartData) {
-    return maybeWrapWithBg(
-      <PieChart
-        data={cut.chartData} title={cut.title} colors={cut.chartColors || theme.chartColors}
-        animationStyle={(cut.chartAnimation as any) || "expand"}
-        donut={cut.donut} centerLabel={cut.centerLabel} centerValue={cut.centerValue}
-        showLegend={cut.showLegend} backgroundColor={bgColor}
-        textColor={textColor}
-      />
-    );
-  }
-  if (cut.type === "kpi_grid" && cut.chartData) {
-    return maybeWrapWithBg(
-      <KPIGrid
-        metrics={cut.chartData} title={cut.title} columns={cut.columns}
-        colors={cut.chartColors || theme.chartColors} animationStyle={(cut.chartAnimation as any) || "count-up"}
-        backgroundColor={bgColor}
-        cardBackgroundColor={cut.cardBackgroundColor || theme.surfaceColor}
-        textColor={textColor}
-      />
-    );
-  }
-  if (cut.type === "progress_bar" && cut.progress !== undefined) {
-    return maybeWrapWithBg(
-      <AbsoluteFill
-        style={{
-          background: bgColor || theme.surfaceColor,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          padding: "80px 120px",
-        }}
-      >
-        {cut.title && (
-          <div style={{
-            position: "absolute", top: 120, fontSize: 48, fontWeight: 700,
-            color: textColor, textAlign: "center", width: "100%",
-            // ProgressBar renders an opaque full-frame AbsoluteFill after this
-            // node, so the title needs to be lifted above it to stay visible.
-            zIndex: 1,
-          }}>
-            {cut.title}
-          </div>
-        )}
-        <ProgressBar
-          progress={cut.progress} label={cut.progressLabel}
-          color={cut.progressColor || accent}
-          animationStyle={(cut.progressAnimation as any) || "fill"}
-          segments={cut.progressSegments} backgroundColor={cut.backgroundColor || theme.surfaceColor}
+  const renderCore = (): React.ReactElement => {
+    // 1. Diagram scene (type: "diagram")
+    if (cut.type === "diagram" && cut.diagramSpec) {
+      return maybeWrapWithBg(
+        <DiagramScene
+          diagramSpec={cut.diagramSpec}
+          accentColor={accent}
+          textColor={textColor}
+          backgroundColor={bgColor}
         />
-      </AbsoluteFill>
-    );
-  }
+      );
+    }
 
-  // --- Anime scene (multi-image crossfade + particles) ---
-  if (cut.type === "anime_scene" && cut.images && cut.images.length > 0) {
+    // 2. Presenter Full Screen (type: "presenter_fullscreen")
+    if (cut.type === "presenter_fullscreen") {
+      return (
+        <PresenterFullScreen
+          src={cut.presenterVideo || cut.source || ""}
+          startFrom={cut.presenterStartFrom ?? cut.source_in_seconds ?? 0}
+          title={cut.title || cut.text}
+          subtitle={cut.subtitle}
+          accentColor={accent}
+          textColor={textColor}
+        />
+      );
+    }
+
+    // Explicit component types — use theme-derived defaults for colors
+    if (cut.type === "text_card" && cut.text) {
+      return maybeWrapWithBg(
+        <TextCard text={cut.text} fontSize={cut.fontSize} color={textColor} backgroundColor={bgColor} />
+      );
+    }
+    if (cut.type === "stat_card" && cut.stat) {
+      return maybeWrapWithBg(
+        <StatCard stat={cut.stat} subtitle={cut.subtitle} accentColor={accent} backgroundColor={bgColor} />
+      );
+    }
+    if (cut.type === "callout" && cut.text) {
+      return maybeWrapWithBg(
+        <CalloutBox
+          text={cut.text} type={cut.callout_type} title={cut.title}
+          borderColor={accent} backgroundColor={cut.backgroundColor || theme.surfaceColor}
+          textColor={textColor} containerBackgroundColor={bgColor}
+          fontSize={cut.fontSize} titleFontSize={cut.titleFontSize}
+        />
+      );
+    }
+    if (cut.type === "comparison" && cut.leftLabel && cut.rightLabel && cut.leftValue && cut.rightValue) {
+      return maybeWrapWithBg(
+        <ComparisonCard
+          leftLabel={cut.leftLabel} rightLabel={cut.rightLabel}
+          leftValue={cut.leftValue} rightValue={cut.rightValue}
+          title={cut.title} backgroundColor={bgColor} textColor={textColor}
+          cardBackgroundColor={cut.cardBackgroundColor || theme.surfaceColor}
+        />
+      );
+    }
+    if (cut.type === "hero_title" && cut.text) {
+      return maybeWrapWithBg(
+        <HeroTitle
+          title={cut.text}
+          subtitle={cut.heroSubtitle || cut.subtitle}
+          accentColor={accent}
+          textColor={textColor}
+          subtitleColor={theme.mutedTextColor}
+          scrimBackground={heroScrim(theme)}
+        />
+      );
+    }
+    if (cut.type === "terminal_scene" && cut.steps) {
+      return maybeWrapWithBg(
+        <TerminalScene
+          title={cut.terminalTitle || "Terminal"}
+          steps={cut.steps as TerminalStep[]}
+          prompt={cut.prompt}
+          accentColor={accent}
+          backgroundColor={bgColor || theme.backgroundColor}
+        />
+      );
+    }
+    if (cut.type === "screenshot_scene" && cut.backgroundImage && cut.screenshotSteps) {
+      return (
+        <ScreenshotScene
+          backgroundImage={cut.backgroundImage}
+          backgroundSize={cut.screenshotSize}
+          steps={cut.screenshotSteps as ScreenshotStep[]}
+          accentColor={accent}
+          cursorStartAt={cut.cursorStartAt}
+        />
+      );
+    }
+
+    // --- Chart types — use theme.chartColors as default palette ---
+    if (cut.type === "bar_chart" && cut.chartData) {
+      return maybeWrapWithBg(
+        <BarChart
+          data={cut.chartData} title={cut.title} colors={cut.chartColors || theme.chartColors}
+          animationStyle={(cut.chartAnimation as any) || "grow-up"}
+          showGrid={cut.showGrid} showValues={cut.showValues} backgroundColor={bgColor}
+          textColor={textColor}
+        />
+      );
+    }
+    if (cut.type === "line_chart" && cut.chartSeries) {
+      return maybeWrapWithBg(
+        <LineChart
+          series={cut.chartSeries} title={cut.title} colors={cut.chartColors || theme.chartColors}
+          animationStyle={(cut.chartAnimation as any) || "draw"}
+          showGrid={cut.showGrid} showMarkers={cut.showMarkers} showLegend={cut.showLegend}
+          xLabel={cut.xLabel} yLabel={cut.yLabel} backgroundColor={bgColor}
+          textColor={textColor}
+        />
+      );
+    }
+    if (cut.type === "pie_chart" && cut.chartData) {
+      return maybeWrapWithBg(
+        <PieChart
+          data={cut.chartData} title={cut.title} colors={cut.chartColors || theme.chartColors}
+          animationStyle={(cut.chartAnimation as any) || "expand"}
+          donut={cut.donut} centerLabel={cut.centerLabel} centerValue={cut.centerValue}
+          showLegend={cut.showLegend} backgroundColor={bgColor}
+          textColor={textColor}
+        />
+      );
+    }
+    if (cut.type === "kpi_grid" && cut.chartData) {
+      return maybeWrapWithBg(
+        <KPIGrid
+          metrics={cut.chartData} title={cut.title} columns={cut.columns}
+          colors={cut.chartColors || theme.chartColors} animationStyle={(cut.chartAnimation as any) || "count-up"}
+          backgroundColor={bgColor}
+          cardBackgroundColor={cut.cardBackgroundColor || theme.surfaceColor}
+          textColor={textColor}
+        />
+      );
+    }
+    if (cut.type === "progress_bar" && cut.progress !== undefined) {
+      return maybeWrapWithBg(
+        <AbsoluteFill
+          style={{
+            background: bgColor || theme.surfaceColor,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            padding: "80px 120px",
+          }}
+        >
+          {cut.title && (
+            <div style={{
+              position: "absolute", top: 120, fontSize: 48, fontWeight: 700,
+              color: textColor, textAlign: "center", width: "100%",
+              zIndex: 1,
+            }}>
+              {cut.title}
+            </div>
+          )}
+          <ProgressBar
+            progress={cut.progress} label={cut.progressLabel}
+            color={cut.progressColor || accent}
+            animationStyle={(cut.progressAnimation as any) || "fill"}
+            segments={cut.progressSegments} backgroundColor={cut.backgroundColor || theme.surfaceColor}
+          />
+        </AbsoluteFill>
+      );
+    }
+
+    // --- Anime scene (multi-image crossfade + particles) ---
+    if (cut.type === "anime_scene" && cut.images && cut.images.length > 0) {
+      return (
+        <AnimeScene
+          images={cut.images}
+          animation={(cut.animation as CameraMotion) || "ken-burns"}
+          particles={cut.particles}
+          particleColor={cut.particleColor}
+          particleCount={cut.particleCount}
+          particleIntensity={cut.particleIntensity}
+          backgroundColor={cut.backgroundColor}
+          vignette={cut.vignette ?? true}
+          lightingFrom={cut.lightingFrom}
+          lightingTo={cut.lightingTo}
+          sceneDurationSeconds={cut.out_seconds - cut.in_seconds}
+        />
+      );
+    }
+
+    // --- Media types (image / video fallback) ---
+    const animation = cut.animation || cut.transform?.animation;
+
+    if (cut.source && isImage(cut.source)) {
+      return maybeWrapWithBg(<ImageScene src={cut.source} animation={animation} />);
+    }
+
+    if (cut.source && isVideo(cut.source)) {
+      return maybeWrapWithBg(
+        <VideoScene
+          src={cut.source}
+          startFrom={cut.source_in_seconds ?? 0}
+          transitionIn={cut.transition_in}
+          transitionOut={cut.transition_out}
+          transitionDuration={cut.transition_duration}
+          sceneDurationSeconds={cut.out_seconds - cut.in_seconds}
+          backgroundColor={cut.backgroundColor}
+        />,
+      );
+    }
+
+    // Final fallback — try as image if source exists, otherwise show text_card
+    if (cut.source) {
+      return maybeWrapWithBg(<ImageScene src={cut.source} animation={animation} />);
+    }
+
+    // No source, no type — render as text card with cut id as fallback
+    return <TextCard text={cut.text || cut.id} color={textColor} backgroundColor={bgColor} />;
+  };
+
+  const coreElement = renderCore();
+
+  // If presenter screen split is requested
+  if (cut.type === "presenter_screen_split" && cut.presenterVideo) {
     return (
-      <AnimeScene
-        images={cut.images}
-        animation={(cut.animation as CameraMotion) || "ken-burns"}
-        particles={cut.particles}
-        particleColor={cut.particleColor}
-        particleCount={cut.particleCount}
-        particleIntensity={cut.particleIntensity}
-        backgroundColor={cut.backgroundColor}
-        vignette={cut.vignette ?? true}
-        lightingFrom={cut.lightingFrom}
-        lightingTo={cut.lightingTo}
-        sceneDurationSeconds={cut.out_seconds - cut.in_seconds}
-      />
+      <PresenterScreenSplit
+        presenterSrc={cut.presenterVideo}
+        startFrom={cut.presenterStartFrom ?? 0}
+        presenterSide={cut.presenterSide || "left"}
+        splitRatio={cut.splitRatio || 0.35}
+        accentColor={accent}
+      >
+        {coreElement}
+      </PresenterScreenSplit>
     );
   }
 
-  // --- Media types (image / video fallback) ---
-  const animation = cut.animation || cut.transform?.animation;
-
-  if (cut.source && isImage(cut.source)) {
-    return maybeWrapWithBg(<ImageScene src={cut.source} animation={animation} />);
-  }
-
-  if (cut.source && isVideo(cut.source)) {
-    return maybeWrapWithBg(
-      <VideoScene
-        src={cut.source}
-        startFrom={cut.source_in_seconds ?? 0}
-        transitionIn={cut.transition_in}
-        transitionOut={cut.transition_out}
-        transitionDuration={cut.transition_duration}
-        sceneDurationSeconds={cut.out_seconds - cut.in_seconds}
-        backgroundColor={cut.backgroundColor}
-      />,
+  // If PIP presenter overlay is requested on top of this scene
+  if (cut.presenterPip && cut.presenterVideo) {
+    const pipPos = typeof cut.presenterPip === "object" ? cut.presenterPip.position : "bottom-right";
+    const pipW = typeof cut.presenterPip === "object" ? cut.presenterPip.pipWidthPercent : 25;
+    const pipLabel = typeof cut.presenterPip === "object" ? cut.presenterPip.label : cut.presenterLabel;
+    return (
+      <PresenterPip
+        presenterSrc={cut.presenterVideo}
+        startFrom={cut.presenterStartFrom ?? 0}
+        position={pipPos || "bottom-right"}
+        pipWidthPercent={pipW || 25}
+        accentColor={accent}
+        label={pipLabel}
+      >
+        {coreElement}
+      </PresenterPip>
     );
   }
 
-  // Final fallback — try as image if source exists, otherwise show text_card
-  if (cut.source) {
-    return maybeWrapWithBg(<ImageScene src={cut.source} animation={animation} />);
-  }
-
-  // No source, no type — render as text card with cut id as fallback
-  return <TextCard text={cut.text || cut.id} color={textColor} backgroundColor={bgColor} />;
+  return coreElement;
 };
 
 // ---------------------------------------------------------------------------

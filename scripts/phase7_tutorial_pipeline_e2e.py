@@ -36,10 +36,12 @@ from lib.checkpoint import (
 )
 from lib.pipeline_loader import load_pipeline
 from lib.scene_cache import SceneCacheManager, compute_scene_hash
+from lib.asset_resolver import AssetResolver
 from styles.playbook_loader import load_playbook
 from tools.audio.mlx_tts_provider import MlxTTSProvider
 from tools.avatar.local_talking_head_provider import LocalTalkingHeadProvider
 from tools.ingestion.universal_ingestor import UniversalIngestor
+from tools.video.scene_plan_adapter import ScenePlanAdapter
 from tools.video.video_compose import VideoCompose
 from schemas.artifacts import validate_artifact
 
@@ -468,68 +470,162 @@ def main():
     palette = playbook["visual_language"]["color_palette"]
 
     scene_plan_data = {
-        "version": "1.0",
+        "version": "2.0",
         "style_playbook": "software-technical",
-        "scenes": [
+        "sections": [
             {
-                "id": "scene_s1",
-                "type": "animation",
-                "description": "Local-First AI Video title card",
-                "start_seconds": 0.0,
-                "end_seconds": 10.0,
+                "section_id": "sec_s1",
                 "script_section_id": "s1",
-                "narrative_role": "introduce_subject",
-                "information_role": "Hook & Architecture",
-                "hero_moment": True,
-                "required_assets": [{"id": "audio_s1", "type": "narration", "description": "Narration s1", "source": "generate"}]
+                "learning_objective": "Local-First AI Video Engine",
+                "key_takeaway": "Apple Silicon Pipeline Architecture",
+                "presenter_policy": {
+                    "mode": "fullscreen",
+                    "position": "fullscreen",
+                    "framing": "medium_close_up",
+                    "eye_contact": "direct",
+                    "lighting": "studio",
+                    "background_blur": 0.2
+                },
+                "canvas": {"aspect_ratio": "16:9", "width": 1920, "height": 1080, "fps": 30},
+                "visual_beats": [
+                    {
+                        "beat_id": "s1",
+                        "visual_type": "presenter_fullscreen",
+                        "visual_reason": "Hook the viewer with an authoritative, recorded technical presenter introducing the local pipeline",
+                        "duration_hint_seconds": 10.0,
+                        "title": "Local-First AI Video",
+                        "layout": {"presenter_pip": False},
+                        "asset_requirements": ["presenter_lead"]
+                    }
+                ]
             },
             {
-                "id": "scene_s2",
-                "type": "diagram",
-                "description": "Unified memory architecture stat card",
-                "start_seconds": 10.0,
-                "end_seconds": 22.0,
+                "section_id": "sec_s2",
                 "script_section_id": "s2",
-                "narrative_role": "evidence",
-                "information_role": "Unified Memory & Speed",
-                "hero_moment": False,
-                "required_assets": [{"id": "audio_s2", "type": "narration", "description": "Narration s2", "source": "generate"}]
+                "learning_objective": "Unified Memory & Speed Architecture",
+                "key_takeaway": "13.0x Real-time synthesis on Apple Silicon",
+                "presenter_policy": {
+                    "mode": "pip",
+                    "position": "bottom-right",
+                    "pip_size": "medium"
+                },
+                "canvas": {"aspect_ratio": "16:9", "width": 1920, "height": 1080, "fps": 30},
+                "visual_beats": [
+                    {
+                        "beat_id": "s2",
+                        "visual_type": "diagram",
+                        "visual_reason": "Visual diagram demonstrating unified memory flow with presenter commentary in PIP",
+                        "duration_hint_seconds": 12.0,
+                        "diagram_spec": {
+                            "title": "Unified Memory Architecture",
+                            "subtitle": "Apple Silicon M6 Pipeline",
+                            "nodes": ["Unified Memory", "Kokoro MLX TTS", "Remotion Master"],
+                            "edges": [
+                                ["Unified Memory", "Kokoro MLX TTS"],
+                                ["Kokoro MLX TTS", "Remotion Master"]
+                            ],
+                            "direction": "horizontal",
+                            "activeNodeIndex": 1
+                        },
+                        "layout": {
+                            "presenter_pip": True,
+                            "pip_position": "bottom-right",
+                            "pip_width_percent": 25
+                        },
+                        "asset_requirements": ["presenter_lead"]
+                    }
+                ]
             },
             {
-                "id": "scene_s3",
-                "type": "diagram",
-                "description": "Universal ingestion security card",
-                "start_seconds": 22.0,
-                "end_seconds": 34.0,
+                "section_id": "sec_s3",
                 "script_section_id": "s3",
-                "narrative_role": "evidence",
-                "information_role": "Universal Ingestion & Safety",
-                "hero_moment": False,
-                "required_assets": [{"id": "audio_s3", "type": "narration", "description": "Narration s3", "source": "generate"}]
+                "learning_objective": "Universal Ingestion & Security Provenance",
+                "key_takeaway": "SHA-256 Provenance and Secret Redaction",
+                "presenter_policy": {"mode": "off"},
+                "canvas": {"aspect_ratio": "16:9", "width": 1920, "height": 1080, "fps": 30},
+                "visual_beats": [
+                    {
+                        "beat_id": "s3",
+                        "visual_type": "screenshot_scene",
+                        "visual_reason": "Concrete UI screenshot showing SHA-256 ingestion provenance verification with callout",
+                        "duration_hint_seconds": 12.0,
+                        "screenshot_spec": {
+                            "steps": [
+                                {
+                                    "kind": "highlight_box",
+                                    "region": {"x": 0.15, "y": 0.2, "w": 0.7, "h": 0.55},
+                                    "color": palette["accent"][0],
+                                    "durationSeconds": 8.0
+                                },
+                                {
+                                    "kind": "callout_balloon",
+                                    "anchor": [0.5, 0.45],
+                                    "text": "Universal Ingestion & SHA-256 Provenance",
+                                    "position": "top",
+                                    "durationSeconds": 6.0
+                                }
+                            ]
+                        },
+                        "layout": {"presenter_pip": False},
+                        "asset_requirements": ["screenshot_ui"]
+                    }
+                ]
             },
             {
-                "id": "scene_s4",
-                "type": "diagram",
-                "description": "Graceful presenter fallback card",
-                "start_seconds": 34.0,
-                "end_seconds": 46.0,
+                "section_id": "sec_s4",
                 "script_section_id": "s4",
-                "narrative_role": "evidence",
-                "information_role": "Graceful Avatar Degradation",
-                "hero_moment": False,
-                "required_assets": [{"id": "audio_s4", "type": "narration", "description": "Narration s4", "source": "generate"}]
+                "learning_objective": "Terminal Workflow Execution & Presenter PIP",
+                "key_takeaway": "Deterministic local generation with zero cloud cost",
+                "presenter_policy": {
+                    "mode": "pip",
+                    "position": "bottom-right",
+                    "pip_size": "medium"
+                },
+                "canvas": {"aspect_ratio": "16:9", "width": 1920, "height": 1080, "fps": 30},
+                "visual_beats": [
+                    {
+                        "beat_id": "s4",
+                        "visual_type": "screen_recording",
+                        "visual_reason": "Live workflow demonstration showing real terminal command execution with presenter in PIP",
+                        "duration_hint_seconds": 12.0,
+                        "layout": {
+                            "presenter_pip": True,
+                            "pip_position": "bottom-right",
+                            "pip_width_percent": 25
+                        },
+                        "asset_requirements": ["presenter_lead", "screen_recording_demo"]
+                    }
+                ]
             },
             {
-                "id": "scene_s5",
-                "type": "animation",
-                "description": "Mastering and caching conclusion card",
-                "start_seconds": 46.0,
-                "end_seconds": 60.0,
+                "section_id": "sec_s5",
                 "script_section_id": "s5",
-                "narrative_role": "introduce_subject",
-                "information_role": "Deterministic Mastery",
-                "hero_moment": False,
-                "required_assets": [{"id": "audio_s5", "type": "narration", "description": "Narration s5", "source": "generate"}]
+                "learning_objective": "Deterministic Mastering & Scene Caching",
+                "key_takeaway": "EBU R128 Loudness and Immutable SHA-256 Scene Cache",
+                "presenter_policy": {"mode": "off"},
+                "canvas": {"aspect_ratio": "16:9", "width": 1920, "height": 1080, "fps": 30},
+                "visual_beats": [
+                    {
+                        "beat_id": "s5",
+                        "visual_type": "diagram",
+                        "visual_reason": "Animated architecture diagram concluding the pipeline with caching and mastering stages",
+                        "duration_hint_seconds": 14.0,
+                        "diagram_spec": {
+                            "title": "Deterministic Delivery Engine",
+                            "subtitle": "EBU R128 & Scene Caching",
+                            "nodes": ["Content Hash", "Scene Cache", "EBU R128 Mastering", "Deterministic MP4"],
+                            "edges": [
+                                ["Content Hash", "Scene Cache"],
+                                ["Scene Cache", "EBU R128 Mastering"],
+                                ["EBU R128 Mastering", "Deterministic MP4"]
+                            ],
+                            "direction": "horizontal",
+                            "activeNodeIndex": 2
+                        },
+                        "layout": {"presenter_pip": False},
+                        "asset_requirements": []
+                    }
+                ]
             }
         ]
     }
@@ -542,58 +638,15 @@ def main():
         human_approved=True,
     )
 
-    # Remotion visual props per scene
-    scene_visuals = {
-        "s1": {
-            "cut_type": "text_card",
-            "props": {
-                "title": "Local-First AI Video",
-                "subtitle": "Apple Silicon M6 Pipeline",
-                "accentColor": palette["accent"][0]
-            }
-        },
-        "s2": {
-            "cut_type": "stat_card",
-            "props": {
-                "stat": "13.0x",
-                "label": "Real-Time Synthesis Speed",
-                "subtext": "24 kHz Kokoro MLX Speech Engine",
-                "subtitle": "Real-Time Synthesis Speed — 24 kHz Kokoro MLX Speech Engine",
-                "accentColor": palette["accent"][0],
-            },
-        },
-        "s3": {
-            "cut_type": "text_card",
-            "props": {
-                "title": "Universal Ingestion",
-                "subtitle": "SHA-256 Provenance & Secret Redaction",
-                "accentColor": palette["accent"][1]
-            }
-        },
-        "s4": {
-            "cut_type": "stat_card",
-            "props": {
-                "stat": "$0.00",
-                "label": "Recurring Cloud Cost",
-                "subtext": "Graceful Presenter Degradation",
-                "subtitle": "Recurring Cloud Cost — Graceful Presenter Degradation",
-                "accentColor": palette["accent"][0],
-            },
-        },
-        "s5": {
-            "cut_type": "text_card",
-            "props": {
-                "title": "Deterministic Mastery",
-                "subtitle": "-14 LUFS EBU R128 & Scene Caching",
-                "accentColor": palette["accent"][1]
-            }
-        }
-    }
-
     # 6. Asset Generation Stage
-    print("\n[Stage 5] Asset Generation (MLX TTS Narration & Avatar Fallback)...")
+    print("\n[Stage 5] Asset Generation (MLX TTS Narration, Recorded Presenter & Visuals)...")
     tts_tool = MlxTTSProvider()
     avatar_tool = LocalTalkingHeadProvider()
+
+    section_beats_by_sid = {
+        sec["script_section_id"]: sec["visual_beats"][0]
+        for sec in scene_plan_data["sections"]
+    }
 
     audio_items = []
     scene_audios = []
@@ -602,13 +655,13 @@ def main():
         sid = sc["id"]
         narration_text = sc["text"]
         out_wav = audio_dir / f"{sid}.wav"
-        v_info = scene_visuals[sid]
+        beat_spec = section_beats_by_sid[sid]
 
         # Content hash check
         shash = compute_scene_hash(
             sid,
             narration_text,
-            v_info["props"],
+            beat_spec,
             style_name="software-technical",
             voice="af_heart",
             speed=1.0,
@@ -640,6 +693,7 @@ def main():
                 "provider": provider,
                 "model": model,
                 "cached": True,
+                "text": narration_text,
             })
             scene_audios.append(cached_wav)
         else:
@@ -669,6 +723,7 @@ def main():
                 "provider": provider,
                 "model": model,
                 "cached": False,
+                "text": narration_text,
             })
             scene_audios.append(out_wav)
 
@@ -717,26 +772,20 @@ def main():
     loudness_metrics = master_audio_ebu128(master_wav, mastered_wav, target_i=-14.0, target_tp=-1.5)
     print(f"  Mastered Loudness: {loudness_metrics['integrated_lufs']} LUFS, True Peak: {loudness_metrics['true_peak_dbtp']} dBTP")
 
-    asset_manifest = {
-        "version": "1.0",
-        "assets": [
-            {
-                "id": f"narration_{item['scene_id']}",
-                "type": "narration",
-                "path": f"assets/audio/{item['scene_id']}.wav",
-                "source_tool": "mlx_tts",
-                "scene_id": f"scene_{item['scene_id']}",
-                "model": item.get("model", "af_heart"),
-                "cost_usd": 0.0,
-                "duration_seconds": item["duration_s"],
-                "format": "wav",
-                "provider": item.get("provider", "mlx"),
-                "quality_score": 0.95
-            }
-            for item in audio_items
-        ],
-        "total_cost_usd": 0.0
-    }
+    # Resolve all required assets into asset_manifest v2.0
+    print("  [Asset Resolution] Resolving visual assets, presenter video, and screenshots...")
+    asset_resolver = AssetResolver(project_dir=project_dir)
+    presenter_fixture = PROJECT_ROOT / "tests/fixtures/topic_tutorial/presenter_fixture.mp4"
+    screenshot_fixture = PROJECT_ROOT / "tests/fixtures/topic_tutorial/software_ui_screenshot.png"
+    screen_recording_fixture = PROJECT_ROOT / "tests/fixtures/topic_tutorial/screen_recording_fixture.mp4"
+
+    asset_manifest = asset_resolver.resolve_assets(
+        scene_plan=scene_plan_data,
+        narration_items=audio_items,
+        presenter_video_path=presenter_fixture,
+        screenshot_path=screenshot_fixture,
+        screen_demo_path=screen_recording_fixture,
+    )
     save_artifact("asset_manifest", asset_manifest, artifacts_dir / "asset_manifest.json")
 
     write_checkpoint(
@@ -746,74 +795,22 @@ def main():
     )
 
     # 7. Edit Stage
-    print("\n[Stage 6] Edit Decisions & Frame Calculation...")
-    remotion_cuts = []
-    all_captions = []
-    current_time_s = 0.0
+    print("\n[Stage 6] Edit Decisions & Frame Calculation (ScenePlanAdapter)...")
+    adapter = ScenePlanAdapter(style_palette=palette, project_dir=project_dir)
+    compiled = adapter.compile(
+        scene_plan=scene_plan_data,
+        asset_manifest=asset_manifest,
+        audio_items=audio_items,
+        padded_durations=padded_durations,
+    )
+    remotion_cuts = compiled["cuts"]
+    all_captions = compiled["captions"]
+    edit_decisions = compiled["edit_decisions"]
+    visual_analytics = compiled["visual_analytics"]
+
+    total_duration_s = visual_analytics["total_runtime_seconds"]
     fps = 30.0
-
-    for a_item, sc in zip(audio_items, script_data["sections"]):
-        sid = a_item["scene_id"]
-        v_info = scene_visuals[sid]
-        dur = padded_durations[sid]
-        in_s = round(current_time_s, 2)
-        out_s = round(current_time_s + dur, 2)
-
-        # Store 0-based scene-relative captions on the cut for per-scene rendering
-        scene_local_captions = [
-            {
-                "word": ts["word"],
-                "startMs": int(round(ts["startMs"])),
-                "endMs": int(round(ts["endMs"])),
-            }
-            for ts in a_item.get("timestamps", [])
-        ]
-
-        cut = {
-            "id": sid,
-            "type": v_info["cut_type"],
-            "in_seconds": in_s,
-            "out_seconds": out_s,
-            "narrationText": sc["text"],
-            "backgroundColor": "#0F172A",
-            "accentColor": v_info["props"].get("accentColor", palette["accent"][0]),
-            "captions": scene_local_captions,
-            **v_info["props"],
-        }
-        if v_info["cut_type"] == "text_card":
-            cut["text"] = f"{v_info['props']['title']}\n{v_info['props']['subtitle']}"
-
-        remotion_cuts.append(cut)
-
-        offset_ms = int(in_s * 1000)
-        for ts in a_item.get("timestamps", []):
-            all_captions.append({
-                "word": ts["word"],
-                "startMs": int(round(ts["startMs"])) + offset_ms,
-                "endMs": int(round(ts["endMs"])) + offset_ms,
-            })
-
-        current_time_s = out_s
-
-    total_duration_s = round(current_time_s, 2)
     total_frames = int(round(total_duration_s * fps))
-
-    edit_decisions = {
-        "version": "1.0",
-        "render_runtime": "remotion",
-        "cuts": [
-            {
-                "id": f"cut-{idx+1}",
-                "source": f"assets/audio/{c['id']}.wav",
-                "in_seconds": c["in_seconds"],
-                "out_seconds": c["out_seconds"],
-                "layer": "primary",
-                "backgroundColor": "#0F172A",
-                "reason": f"Scene {c['id']} - {c['type']}"
-            }
-            for idx, c in enumerate(remotion_cuts)
-        ]
-    }
     save_artifact("edit_decisions", edit_decisions, artifacts_dir / "edit_decisions.json")
 
     write_checkpoint(
@@ -902,7 +899,17 @@ def main():
     }
     save_artifact("render_report", render_report, artifacts_dir / "render_report.json")
 
-    # Generate full final_review artifact
+    # Generate visual contact sheet across 5 beats
+    contact_sheet_png = renders_dir / "contact_sheet.png"
+    print(f"  Generating contact sheet: {contact_sheet_png.name}...")
+    run_cmd([
+        "ffmpeg", "-y", "-i", str(muxed_mp4),
+        "-vf", "fps=1/5,scale=480:-1,tile=3x3",
+        "-frames:v", "1",
+        str(contact_sheet_png)
+    ])
+
+    # Generate full final_review artifact (inspected by compose runtime QA without forced pass)
     script_full_text = " ".join(s["text"] for s in script_data["sections"])
     final_review = VideoCompose()._run_final_review(
         output_path=muxed_mp4,
@@ -910,7 +917,7 @@ def main():
         proposal_packet=proposal_packet,
         script_text=script_full_text,
     )
-    final_review["status"] = "pass"
+    assert final_review["status"] == "pass", f"Final review failed with status '{final_review.get('status')}'. Issues: {final_review.get('issues')}"
     save_artifact("final_review", final_review, artifacts_dir / "final_review.json")
 
     write_checkpoint(
@@ -1023,12 +1030,12 @@ def main():
     pass1_results = {}
     for c in remotion_cuts:
         sid = c["id"]
-        v_info = scene_visuals[sid]
+        beat_spec = section_beats_by_sid[sid]
         audio_file = audio_dir / f"{sid}_padded.wav"
         shash = compute_scene_hash(
             sid,
             c["narrationText"],
-            v_info["props"],
+            beat_spec,
             style_name="software-technical",
             duration_s=round(c["out_seconds"] - c["in_seconds"], 2),
             voice="af_heart",
@@ -1088,12 +1095,12 @@ def main():
     pass2_results = {}
     for c in pass2_cuts:
         sid = c["id"]
-        v_info = scene_visuals[sid]
+        beat_spec = section_beats_by_sid[sid]
         audio_file = out_wav_s2_padded if sid == "s2" else audio_dir / f"{sid}_padded.wav"
         shash = compute_scene_hash(
             sid,
             c["narrationText"],
-            v_info["props"],
+            beat_spec,
             style_name="software-technical",
             duration_s=round(c["out_seconds"] - c["in_seconds"], 2),
             voice="af_heart",

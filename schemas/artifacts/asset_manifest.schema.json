@@ -2,60 +2,91 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "openmontage/artifacts/asset_manifest",
   "title": "Asset Manifest",
-  "description": "Inventory of generated/sourced assets produced by the Asset Generator.",
+  "description": "Inventory of generated/sourced assets produced by the Asset Generator, supporting v1.0 and v2.0.",
   "type": "object",
   "required": ["version", "assets"],
   "properties": {
-    "version": { "type": "string", "const": "1.0" },
+    "version": { "type": "string", "enum": ["1.0", "2.0"] },
     "assets": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "type", "path", "source_tool", "scene_id"],
+        "required": ["path"],
         "properties": {
           "id": { "type": "string" },
+          "asset_id": { "type": "string" },
           "type": {
             "type": "string",
-            "enum": ["image", "video", "audio", "narration", "music", "sfx", "diagram", "animation", "3d_asset", "3d_world", "code_snippet", "subtitle", "font", "lut"]
+            "enum": [
+              "image", "video", "audio", "narration", "music", "sfx", "diagram",
+              "animation", "3d_asset", "3d_world", "code_snippet", "subtitle",
+              "font", "lut", "presenter_video", "screen_recording", "screenshot",
+              "chart", "broll", "generated_broll_video"
+            ]
+          },
+          "asset_type": {
+            "type": "string",
+            "enum": [
+              "image", "video", "audio", "narration", "music", "sfx", "diagram",
+              "animation", "3d_asset", "3d_world", "code_snippet", "subtitle",
+              "font", "lut", "presenter_video", "screen_recording", "screenshot",
+              "chart", "broll", "generated_broll_video"
+            ]
           },
           "path": { "type": "string", "description": "Relative path within the pipeline project directory" },
           "source_tool": { "type": "string" },
+          "provider_id": { "type": "string" },
+          "provider": { "type": "string" },
+          "runtime": { "type": "string", "enum": ["local", "manual_import", "cloud", "api", "local_gpu"] },
+          "source_type": { "type": "string" },
+          "source_reference": { "type": "string" },
           "scene_id": { "type": "string" },
+          "scene_ids": { "type": "array", "items": { "type": "string" } },
+          "beat_ids": { "type": "array", "items": { "type": "string" } },
+          "sha256": { "type": "string" },
           "prompt": { "type": "string", "description": "Generation prompt if AI-generated" },
-          "seed": { "type": "integer", "description": "Seed if applicable" },
-          "model": { "type": "string", "description": "Model used for generation" },
+          "prompt_hash": { "type": "string" },
+          "seed": { "type": "integer" },
+          "model": { "type": "string" },
+          "model_id": { "type": "string" },
           "cost_usd": { "type": "number", "minimum": 0 },
+          "cost_estimate_usd": { "type": "number", "minimum": 0 },
+          "actual_cost_usd": { "type": "number", "minimum": 0 },
           "duration_seconds": { "type": "number", "minimum": 0 },
           "resolution": { "type": "string" },
+          "width": { "type": "integer" },
+          "height": { "type": "integer" },
+          "fps": { "type": "number" },
+          "sample_rate": { "type": "integer" },
+          "channels": { "type": "integer" },
+          "audio_tracks": { "type": "integer" },
+          "audio_policy": { "type": "string", "enum": ["keep", "mute", "replace", "mix"] },
+          "rights_status": { "type": "string" },
+          "license": { "type": "string" },
+          "original_url": { "type": "string" },
           "format": { "type": "string" },
+          "mime_type": { "type": "string" },
+          "status": { "type": "string" },
+          "generation_status": { "type": "string" },
+          "validation_status": { "type": "string" },
           "quality_score": { "type": "number", "minimum": 0, "maximum": 1 },
-          "subtype": { "type": "string", "description": "Sub-classification (e.g. 'background', 'stock', 'generated')" },
-          "generation_summary": { "type": "string", "description": "Brief summary of how the asset was generated or sourced" },
-          "provider": { "type": "string", "description": "Provider name (e.g. pixabay, google_imagen)" },
-          "license": { "type": "string", "description": "License type (e.g. Pixabay License, CC0)" },
-          "original_url": { "type": "string", "description": "Source URL if downloaded from a stock service" },
+          "subtype": { "type": "string" },
+          "generation_summary": { "type": "string" },
           "voice_performance": {
             "type": "object",
-            "description": "Applied voice-performance contract for narration assets.",
             "properties": {
-              "source_section_id": { "type": "string" },
-              "delivery_cues_applied": { "type": "boolean" },
-              "provider_text_used": { "type": "boolean" },
-              "provider_settings": {
-                "type": "object",
-                "additionalProperties": true
-              },
-              "sample_approved": { "type": "boolean" },
-              "sample_path": { "type": "string" },
-              "review_notes": { "type": "string" }
+              "provider_settings": { "type": "object" }
             },
-            "additionalProperties": false
+            "additionalProperties": true
           }
         },
-        "additionalProperties": false
+        "additionalProperties": true
       }
     },
     "total_cost_usd": { "type": "number", "minimum": 0 },
+    "estimated_total_cost_usd": { "type": "number", "minimum": 0 },
+    "actual_total_cost_usd": { "type": "number", "minimum": 0 },
+    "provider_usage": { "type": "array" },
     "metadata": { "type": "object" }
   },
   "additionalProperties": false

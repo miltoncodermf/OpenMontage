@@ -481,3 +481,325 @@ class TestCheckpointResumeSimulation:
 
         final_completed = get_completed_stages(base_dir, proj_id)
         assert final_completed == ["research", "proposal", "script", "scene_plan", "assets", "edit", "compose"]
+
+
+class TestScenePlanV2AndAdapterContract:
+    """Verifies Scene Plan v2 IR schema validation, v1->v2 migration, and ScenePlanAdapter."""
+
+    def test_scene_plan_v2_schema_validation(self):
+        from schemas.artifacts import validate_artifact
+
+        plan_v2 = {
+            "version": "2.0",
+            "style_playbook": "software-technical",
+            "sections": [
+                {
+                    "section_id": "sec_1",
+                    "script_section_id": "s1",
+                    "learning_objective": "System Ingestion Architecture",
+                    "key_takeaway": "SHA-256 Provenance",
+                    "visual_beats": [
+                        {
+                            "beat_id": "beat_1",
+                            "visual_type": "presenter_fullscreen",
+                            "duration_hint_seconds": 6.0,
+                            "visual_reason": "Presenter intro",
+                        }
+                    ],
+                }
+            ],
+        }
+        validate_artifact("scene_plan", plan_v2)
+
+    def test_v1_to_v2_migration(self):
+        from lib.scene_plan_migration import migrate_scene_plan_v1_to_v2
+        from schemas.artifacts import validate_artifact
+
+        plan_v1 = {
+            "version": "1.0",
+            "scenes": [
+                {
+                    "id": "scene_s1",
+                    "type": "animation",
+                    "description": "Introduction card",
+                    "start_seconds": 0.0,
+                    "end_seconds": 8.0,
+                    "script_section_id": "s1",
+                    "narrative_role": "introduce_subject",
+                    "information_role": "Hook",
+                    "hero_moment": True,
+                    "required_assets": [{"type": "narration", "description": "Audio", "source": "generate"}],
+                }
+            ],
+        }
+        migrated = migrate_scene_plan_v1_to_v2(plan_v1)
+        assert migrated["version"] == "2.0"
+        assert len(migrated["sections"]) == 1
+        assert migrated["sections"][0]["section_id"] == "section_s1"
+        assert len(migrated["sections"][0]["visual_beats"]) >= 1
+        validate_artifact("scene_plan", migrated)
+
+    def test_scene_plan_adapter_compiles_visual_beats(self):
+        from tools.video.scene_plan_adapter import ScenePlanAdapter
+
+        plan = {
+            "version": "2.0",
+            "sections": [
+                {
+                    "section_id": "sec_1",
+                    "script_section_id": "s1",
+                    "learning_objective": "Presenter Lead",
+                    "visual_beats": [
+                        {
+                            "beat_id": "s1_b1",
+                            "visual_type": "presenter_fullscreen",
+                            "duration_hint_seconds": 5.0,
+                            "title": "Welcome",
+                        }
+                    ],
+                },
+                {
+                    "section_id": "sec_2",
+                    "script_section_id": "s2",
+                    "learning_objective": "Architecture Flow",
+                    "visual_beats": [
+                        {
+                            "beat_id": "s2_b1",
+                            "visual_type": "diagram",
+                            "duration_hint_seconds": 8.0,
+                            "diagram_spec": {
+                                "title": "Pipeline",
+                                "nodes": ["A", "B"],
+                                "edges": [["A", "B"]],
+                            },
+                            "layout": {"presenter_pip": True},
+                        }
+                    ],
+                },
+                {
+                    "section_id": "sec_3",
+                    "script_section_id": "s3",
+                    "learning_objective": "UI Callout",
+                    "visual_beats": [
+                        {
+                            "beat_id": "s3_b1",
+                            "visual_type": "screenshot_scene",
+                            "duration_hint_seconds": 6.0,
+                            "screenshot_spec": {"steps": []},
+                        }
+                    ],
+                },
+                {
+                    "section_id": "sec_4",
+                    "script_section_id": "s4",
+                    "learning_objective": "Terminal Run",
+                    "visual_beats": [
+                        {
+                            "beat_id": "s4_b1",
+                            "visual_type": "screen_recording",
+                            "duration_hint_seconds": 7.0,
+                            "layout": {"presenter_pip": True},
+                        }
+                    ],
+                },
+                {
+                    "section_id": "sec_5",
+                    "script_section_id": "s5",
+                    "learning_objective": "Conclusion Flow",
+                    "visual_beats": [
+                        {
+                            "beat_id": "s5_b1",
+                            "visual_type": "diagram",
+                            "duration_hint_seconds": 6.0,
+                            "diagram_spec": {
+                                "title": "Mastery",
+                                "nodes": ["X", "Y"],
+                                "edges": [["X", "Y"]],
+                            },
+                        }
+                    ],
+                },
+            ],
+        }
+
+        manifest = {
+            "version": "2.0",
+            "assets": [
+                {"asset_id": "pres", "asset_type": "presenter_video", "path": "/path/to/presenter.mp4"},
+                {"asset_id": "shot", "asset_type": "screenshot", "path": "/path/to/screen.png"},
+                {"asset_id": "rec", "asset_type": "screen_recording", "path": "/path/to/demo.mp4"},
+            ],
+        }
+
+        audio_items = [
+            {"scene_id": "s1", "duration_s": 5.0, "timestamps": [{"word": "Hi", "startMs": 0, "endMs": 500}]},
+            {"scene_id": "s2", "duration_s": 8.0, "timestamps": [{"word": "Flow", "startMs": 0, "endMs": 600}]},
+            {"scene_id": "s3", "duration_s": 6.0, "timestamps": [{"word": "UI", "startMs": 0, "endMs": 400}]},
+            {"scene_id": "s4", "duration_s": 7.0, "timestamps": [{"word": "Demo", "startMs": 0, "endMs": 700}]},
+            {"scene_id": "s5", "duration_s": 6.0, "timestamps": [{"word": "End", "startMs": 0, "endMs": 500}]},
+        ]
+        padded_durations = {"s1": 5.6, "s2": 8.6, "s3": 6.6, "s4": 7.6, "s5": 6.6}
+
+        adapter = ScenePlanAdapter()
+        compiled = adapter.compile(plan, manifest, audio_items, padded_durations)
+
+        cuts = compiled["cuts"]
+        assert len(cuts) == 5
+        assert cuts[0]["type"] == "presenter_fullscreen"
+        assert cuts[1]["type"] == "diagram"
+        assert cuts[1]["presenterPip"] is True
+        assert cuts[2]["type"] == "screenshot_scene"
+        assert cuts[3]["type"] == "video"
+        assert cuts[3]["presenterPip"] is True
+        assert cuts[4]["type"] == "diagram"
+
+        analytics = compiled["visual_analytics"]
+        assert analytics["text_card_percentage"] == 0.0
+        assert analytics["meaningful_visual_percentage"] == 100.0
+        assert analytics["presenter_percentage"] > 0.0
+
+
+class TestRecordedVideoProviderContract:
+    """Verifies media container verification and error handling for recorded presenter video."""
+
+    def test_probe_valid_presenter_video(self):
+        from tools.presenters.recorded_video_provider import RecordedVideoProvider
+
+        fixture = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "presenter_fixture.mp4"
+        if not fixture.is_file():
+            pytest.skip("Presenter fixture not yet generated")
+
+        provider = RecordedVideoProvider()
+        res = provider.execute({"video_path": str(fixture)})
+        assert res.success is True
+        data = res.data
+        assert data["asset"]["asset_type"] == "presenter_video"
+        assert data["asset"]["resolution"] == "1920x1080"
+        assert data["asset"]["width"] == 1920
+        assert data["asset"]["height"] == 1080
+        assert data["asset"]["fps"] == 30.0
+
+    def test_missing_video_fails_cleanly(self):
+        from tools.presenters.recorded_video_provider import RecordedVideoProvider
+
+        provider = RecordedVideoProvider()
+        res = provider.execute({"video_path": "/path/to/nonexistent_video.mp4"})
+        assert res.success is False
+        assert "not found" in res.error.lower()
+
+
+class TestAlignmentProviderContract:
+    """Verifies speech energy and phonemic alignment without faked equal-spacing."""
+
+    def test_alignment_monotonicity_and_boundaries(self):
+        from tools.audio.alignment_provider import AlignmentProvider
+
+        aligner = AlignmentProvider()
+        text = "Universal ingestion ensures reproducible SHA-256 asset provenance across pipelines."
+        dur_s = 4.8
+        timestamps = aligner.align_words(text, dur_s)
+
+        assert len(timestamps) > 0
+        words = text.split()
+        assert len(timestamps) == len(words)
+
+        prev_end = 0.0
+        for ts in timestamps:
+            assert ts["startMs"] < ts["endMs"]
+            assert ts["startMs"] >= prev_end - 1.0  # Monotonic
+            assert ts["endMs"] <= dur_s * 1000 + 50.0  # Within total duration
+            prev_end = ts["startMs"]
+
+
+class TestAssetResolverContract:
+    """Verifies asset fulfillment into validated v2 asset manifest."""
+
+    def test_resolve_assets_and_validate_manifest(self, tmp_path):
+        from lib.asset_resolver import AssetResolver
+        from schemas.artifacts import validate_artifact
+
+        resolver = AssetResolver(tmp_path)
+        fixture_p = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "presenter_fixture.mp4"
+        fixture_s = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "software_ui_screenshot.png"
+        fixture_r = Path(__file__).parent.parent / "fixtures" / "topic_tutorial" / "screen_recording_fixture.mp4"
+
+        # Create dummy narration wav
+        wav_p = tmp_path / "assets" / "audio" / "s1.wav"
+        wav_p.write_bytes(b"RIFF" + b"\x00" * 36)
+
+        plan = {
+            "version": "2.0",
+            "sections": [
+                {
+                    "section_id": "sec_1",
+                    "script_section_id": "s1",
+                    "visual_beats": [
+                        {
+                            "beat_id": "b1",
+                            "visual_type": "diagram",
+                            "diagram_spec": {
+                                "title": "Test Diagram",
+                                "nodes": ["Node A", "Node B"],
+                                "edges": [["Node A", "Node B"]],
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        manifest = resolver.resolve_assets(
+            scene_plan=plan,
+            narration_items=[{"scene_id": "s1", "path": str(wav_p), "duration_s": 2.0}],
+            presenter_video_path=fixture_p if fixture_p.is_file() else None,
+            screenshot_path=fixture_s if fixture_s.is_file() else None,
+            screen_demo_path=fixture_r if fixture_r.is_file() else None,
+        )
+
+        assert manifest["version"] == "2.0"
+        assert len(manifest["assets"]) >= 2
+        validate_artifact("asset_manifest", manifest)
+
+
+class TestGeminiOmniVideoCostGuardContract:
+    """Verifies Gemini Omni video cost ceiling and opt-in failsafe."""
+
+    def test_disabled_by_default_fails_closed(self, monkeypatch):
+        from tools.video.gemini_omni_video import GeminiOmniVideo
+
+        monkeypatch.delenv("GEMINI_VIDEO_ENABLED", raising=False)
+        tool = GeminiOmniVideo()
+        res = tool.execute({"prompt": "A presenter explaining AI"})
+        assert res.success is False
+        assert "disabled by default" in res.error
+        assert res.cost_usd == 0.0
+
+    def test_budget_guard_capped_at_app_budget(self, monkeypatch):
+        from tools.video.gemini_omni_video import GeminiOmniVideo
+
+        monkeypatch.setenv("GEMINI_VIDEO_ENABLED", "true")
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        tool = GeminiOmniVideo()
+        # Default estimated cost is ~$1.52, which is capped within the $8.00 app budget
+        est = tool.estimate_cost({"duration_seconds": 10})
+        assert est < 8.00
+
+        # When caller provides budget_ceiling_usd lower than estimate, execution fails closed
+        res = tool.execute({"prompt": "A presenter explaining AI", "budget_ceiling_usd": 1.00})
+        assert res.success is False
+        assert "exceeds configured budget ceiling" in res.error
+        assert res.cost_usd == 0.0
+
+
+class TestVideoComposeQAGovernanceContract:
+    """Verifies VideoCompose QA review cannot be forced and correctly handles burned-in captions."""
+
+    def test_missing_video_evaluates_to_fail(self, tmp_path):
+        from tools.video.video_compose import VideoCompose
+
+        nonexistent = tmp_path / "missing.mp4"
+        vc = VideoCompose()
+        review = vc._run_final_review(output_path=nonexistent)
+        assert review["status"] == "fail"
+        assert review["checks"]["technical_probe"]["valid_container"] is False
+

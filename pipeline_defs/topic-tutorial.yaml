@@ -151,8 +151,15 @@ stages:
       - mlx_tts
       - piper_tts
       - local_talking_head
-      - code_snippet
+      - recorded_video
+      - gemini_personal_avatar_import
+      - google_flow_import
+      - gemini_omni_video
       - diagram_gen
+      - screenshot_import
+      - screen_recording_import
+      - alignment_provider
+      - code_snippet
       - direct_clip_search
       - cap_recorder
       - screen_recorder
@@ -161,11 +168,12 @@ stages:
     human_approval_default: false
     review_focus:
       - Narration audio generated with clean speech and dynamic sample rate
-      - Word timestamps aligned with speech duration
-      - Presenter status correctly logged
+      - Genuine word timestamps aligned with speech duration
+      - Presenter assets verified and registered or graceful fallback explicitly logged
+      - Visual assets (diagrams, screen captures, broll) satisfied for every visual beat
     success_criteria:
-      - Schema-valid asset_manifest artifact
-      - All audio files exist and are verified by ffprobe
+      - Schema-valid asset_manifest artifact containing audio and visual assets
+      - All media files exist, are confined to project, and verified by ffprobe
 
   - name: edit
     skill: pipelines/topic-tutorial/edit-director
