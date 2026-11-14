@@ -45,7 +45,7 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def create_profile(profile_id: str, display_name: str = "") -> Path:
+def create_profile(profile_id: str, display_name: str = "", standin: bool = False) -> Path:
     """Create the 700-mode directory tree and an unlocked profile.json skeleton."""
     d = profile_dir(profile_id)
     if (d / "profile.json").exists():
@@ -63,6 +63,9 @@ def create_profile(profile_id: str, display_name: str = "") -> Path:
         "version": "1.0", "profile_id": profile_id, "display_name": display_name,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "locked": False, "files": {},
     }
+    if standin:
+        skeleton["standin"] = True
+        skeleton["standin_note"] = "STAND-IN — fictional person, not the owner; engine validation only. Can never pass final_review."
     write_profile(d, skeleton)
     return d
 
@@ -160,7 +163,8 @@ def mint_presenter_asset(profile_id: str, path: Path, *, asset_type: str, varian
     path = Path(path).resolve()
     shown = str(path.relative_to(project_dir.resolve())) if project_dir and path.is_relative_to(project_dir.resolve()) else str(path)
     aid = f"presenter_{variant_id}_{sha256_file(path)[:8]}"
-    return {
+    standin = {"standin": True} if prof.get("standin") else {}
+    return {**standin,
         "asset_id": aid, "id": aid, "asset_type": asset_type, "type": asset_type, "path": shown,
         "source_tool": source_tool, "provider_id": source_tool, "runtime": "local_gpu",
         "source_type": "digital_twin", "sha256": sha256_file(path),

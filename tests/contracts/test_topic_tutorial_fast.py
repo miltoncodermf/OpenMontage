@@ -1661,6 +1661,8 @@ class TestV3TwinLipsync:
         from tools.presenters.twin_lipsync import TwinLipsync
 
         monkeypatch.setattr(hl, "LOCK_PATH", tmp_path / "lock")
+        monkeypatch.setenv("MUSETALK_MLX_DIR", str(tmp_path / "no-such-weights"))  # MuseTalk is integrated now: simulate missing weights
+        monkeypatch.setenv("LATENTSYNC_DIR", str(tmp_path / "no-such-latentsync"))
         motion = _moving_clip(tmp_path / "idle.mp4")
         a = self._audio(tmp_path / "a.wav", 1.0)
         for backend in ("musetalk_mlx", "latentsync"):
@@ -1869,7 +1871,7 @@ class TestV3PresenterQA:
         import subprocess
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=1", str(audio)], check=True)
         good = {"asset_id": "p", "asset_type": "presenter_video", "path": "assets/presenter/x.mp4", "identity_transform": "beautified", "profile_id": "owner"}
-        rep = presenter_qa_report(good, clip, audio, 30.0, [])
+        rep = presenter_qa_report(good, clip, audio, 30.0, [], use_defaults=False)  # no providers -> honest not_run
         assert rep["passed"] is False and rep["verdict"] == "incomplete"
         assert set(rep["not_run"]) == {"face_presence", "mouth_sync", "no_raw_frames"} and rep["failed"] == []
         # with injected providers it can pass; a failing identity fails outright
@@ -2224,3 +2226,156 @@ class TestFixRound1ResearchReadiness:
         assert any("video_downloader" in p for p in asset_rights_problems(bad))
         brief = {"data_points": [], "media_candidates": [{"candidate_id": "m", "kind": "clip", "provider": "transcript_fetcher", **rights}]}
         assert any("reference-only" in p for p in brief_problems(brief))
+
+
+class TestFixRound1StandinGuard:
+    def _mk(self, profile_root):
+        from lib import presenter_profile as pp
+
+        d = pp.create_profile("standin-dev", "Fictional stand-in", standin=True)
+        (d / "identity").mkdir(exist_ok=True)
+        (d / "identity" / "canonical.png").write_bytes(b"x")
+        (d / "voice").mkdir(exist_ok=True)
+        (d / "voice" / "voice_profile.json").write_text("{}")
+        prof = pp.read_profile("standin-dev")
+        prof["identity"] = {"canonical": "identity/canonical.png"}
+        prof["voice"] = {"profile": "voice/voice_profile.json"}
+        pp.write_profile(d, prof)
+        pp.lock_profile("standin-dev")
+        return d
+
+    def test_standin_flag_and_minted_asset_carry_marker(self, profile_root, tmp_path):
+        from lib import presenter_profile as pp
+
+        d = self._mk(profile_root)
+        assert pp.read_profile("standin-dev")["standin"] is True and "STAND-IN" in pp.read_profile("standin-dev")["standin_note"]
+        clip = tmp_path / "STANDIN_clip.mp4"
+        clip.write_bytes(b"clip")
+        asset = pp.mint_presenter_asset("standin-dev", clip, asset_type="presenter_video", variant_id="v1", source_tool="twin_lipsync")
+        assert asset["standin"] is True
+
+    def test_standin_never_real_and_final_review_fails(self, profile_root, tmp_path, monkeypatch):
+        from lib import presenter_profile as pp
+        from lib.honesty_guard import honesty_check
+        from lib.presenter_guard import is_real_presenter_asset
+        from tools.video.video_compose import VideoCompose
+
+        monkeypatch.delenv("OPENMONTAGE_TEST_MODE", raising=False)
+        d = self._mk(profile_root)
+        clip = tmp_path / "renamed_innocent.mp4"  # no marker in the name; flagged by the profile record alone
+        clip.write_bytes(b"clip")
+        asset = pp.mint_presenter_asset("standin-dev", clip, asset_type="presenter_video", variant_id="v1", source_tool="twin_lipsync")
+        assert not is_real_presenter_asset(asset)
+        assert not is_real_presenter_asset({k: v for k, v in asset.items() if k != "standin"})  # profile_id alone is enough
+        # a path inside the stand-in profile dir or with the marker is flagged even without a record
+        assert honesty_check({"p": str(d / "loops" / "v1" / "idle.mp4")})["standin_assets"]
+        assert honesty_check({"p": "projects/x/STANDIN_lipsync.mp4"})["blocking"] is True
+        # real profile assets are untouched
+        assert honesty_check({"path": "projects/x/assets/ok.mp4"})["blocking"] is False
+        from lib.loudness import master_two_pass
+
+        video = TestV3LoudnessAndFinalReview()._video(tmp_path / "q.mp4", -30, seconds=2)
+        ok = Path(master_two_pass(video, tmp_path / "m.mp4")["output"])
+        vc = VideoCompose()
+        review = vc._run_final_review(ok, {"cuts": [], "metadata": {}}, asset_manifest={"assets": [asset]})
+        assert review["status"] == "fail" and review["recommended_action"] == "replace_test_assets"
+        assert review["checks"]["honesty_guard"]["standin_assets"]
+        monkeypatch.setenv("OPENMONTAGE_TEST_MODE", "1")
+        assert vc._run_final_review(ok, {"cuts": [], "metadata": {}}, asset_manifest={"assets": [asset]})["status"] != "fail"
+
+    def test_standin_assets_excluded_from_presenter_percentage(self, profile_root, tmp_path):
+        from lib import presenter_profile as pp
+        from tools.video.scene_plan_adapter import ScenePlanAdapter
+
+        self._mk(profile_root)
+        clip = tmp_path / "STANDIN_p.mp4"
+        clip.write_bytes(b"clip")
+        asset = pp.mint_presenter_asset("standin-dev", clip, asset_type="presenter_video", variant_id="v1", source_tool="twin_lipsync")
+        plan = {"version": "2.0", "sections": [{"section_id": "a", "script_section_id": "s1", "learning_objective": "x", "visual_beats": [
+            {"beat_id": "b1", "visual_type": "presenter_fullscreen", "duration_hint_seconds": 4, "layout": {"preset": "presenter_fullscreen"}}]}]}
+        out = ScenePlanAdapter().compile(plan, {"assets": [asset]}, [], {"s1": 4.0})
+        va = out["visual_analytics"]
+        assert va["presenter_percentage"] == 0.0 and va["fixture_presenter_percentage"] > 0.0
+
+
+class TestFixRound1EngineHelpers:
+    def _lm(self):
+        import numpy as np
+
+        from lib import musetalk_runner as mr
+
+        lm = np.zeros((478, 3), dtype=np.float32)
+        for i, idx in enumerate(mr.FACE_OVAL):  # an ellipse around (0.5, 0.5)
+            a = 2 * 3.14159 * i / len(mr.FACE_OVAL)
+            lm[idx] = [0.5 + 0.1 * float(np.cos(a)), 0.5 + 0.3 * float(np.sin(a)), 0]
+        lm[mr.NOSE_BRIDGE] = [0.5, 0.45, 0]
+        lm[mr.CHIN] = [0.5, 0.80, 0]
+        lm[mr.LEFT_EDGE] = [0.40, 0.5, 0]
+        lm[mr.RIGHT_EDGE] = [0.60, 0.5, 0]
+        return lm
+
+    def test_crop_box_follows_upstream_rule(self):
+        from lib import musetalk_runner as mr
+
+        x1, y1, x2, y2 = mr.crop_box(self._lm(), 1000, 1000)
+        assert (x1, x2) == (400, 600)
+        assert y2 == 800 + mr.EXTRA_MARGIN                 # chin + extra margin
+        assert y1 == round(450 - (800 - 450))               # symmetric about the nose bridge
+
+    def test_smooth_boxes_fills_gaps_and_smooths(self):
+        from lib import musetalk_runner as mr
+
+        out = mr.smooth_boxes([None, (100, 100, 200, 200), (110, 100, 210, 200), None, (130, 100, 230, 200)], k=3)
+        assert len(out) == 5 and all(len(b) == 4 for b in out)
+        xs = [b[0] for b in out]
+        assert xs == sorted(xs)  # no jitter reversals
+        with pytest.raises(RuntimeError):
+            mr.smooth_boxes([None, None])
+
+    def test_blend_mask_only_lower_face_and_paste_back_preserves_upper(self):
+        import numpy as np
+
+        from lib import musetalk_runner as mr
+
+        h = w = 400
+        box = (150, 100, 250, 300)
+        lm = self._lm()
+        mask = mr.blend_mask((h, w), lm, box)
+        assert mask.shape == (h, w) and 0.0 <= mask.min() and mask.max() <= 1.0
+        mid = box[1] + (box[3] - box[1]) // 2
+        assert mask[:mid - 5].max() < 0.05 and mask[mid + 40:box[3] - 40, 190:210].max() > 0.5  # nothing above mid, solid below
+        frame = np.full((h, w, 3), 50, np.uint8)
+        face = np.full((256, 256, 3), 200, np.uint8)
+        out = mr.paste_back(frame, face, box, mask)
+        assert out.shape == frame.shape and (out[:mid - 30] == 50).all() and out[mid + 60, 200, 0] > 150
+
+    def test_face_tools_mouth_openness_is_relative_to_face_height(self):
+        import numpy as np
+
+        from lib import face_tools as ft
+
+        lm = np.zeros((478, 3), dtype=np.float32)
+        lm[ft.FOREHEAD] = [0.5, 0.2, 0]
+        lm[ft.CHIN] = [0.5, 0.8, 0]
+        lm[ft.UPPER_LIP] = [0.5, 0.60, 0]
+        lm[ft.LOWER_LIP] = [0.5, 0.63, 0]
+        assert abs(ft.mouth_openness(lm) - 0.05) < 1e-3
+
+    def test_mouth_sync_inconclusive_for_unrelated_audio(self, tmp_path):
+        import numpy as np
+
+        from lib.presenter_qa import significant_offset
+
+        rng = np.random.default_rng(1)
+        env = np.abs(rng.normal(size=200))
+        mouth = np.abs(rng.normal(size=200))
+        assert significant_offset(mouth, env)["significant"] is False
+        shifted = np.roll(env, 3) * 0.9 + 0.01  # a mouth that really follows the audio, 3 frames late
+        res = significant_offset(shifted, env)
+        assert res["significant"] and res["offset_frames"] == 3
+
+    def test_model_store_resolution(self, tmp_path, monkeypatch):
+        from lib import model_store
+
+        monkeypatch.setenv("OPENMONTAGE_MODELS_DIR", str(tmp_path / "m"))
+        assert model_store.models_dir() == tmp_path / "m" and model_store.model_path("a", "b") == tmp_path / "m" / "a" / "b"

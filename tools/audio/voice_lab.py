@@ -33,7 +33,15 @@ from tools.base_tool import (
 
 
 def chatterbox_available() -> bool:
-    return importlib.util.find_spec("chatterbox") is not None
+    from lib import chatterbox_runner
+
+    return chatterbox_runner.available()[0]
+
+
+def chatterbox_unavailable_reason() -> str:
+    from lib import chatterbox_runner
+
+    return chatterbox_runner.available()[1]
 
 
 class VoiceLab(BaseTool):
@@ -50,11 +58,11 @@ class VoiceLab(BaseTool):
     dependencies = ["binary:ffmpeg", "python:kokoro_mlx"]
     agent_skills = ["text-to-speech"]
     install_instructions = (
-        "Kokoro candidates need `kokoro-mlx` (installed). Chatterbox candidates need the MIT `chatterbox` MLX "
-        "backend and its weights (large download: requires the owner's OK per the 500 MB rule)."
+        "Kokoro candidates need `kokoro-mlx` (installed). Chatterbox candidates need `chatterbox-mlx` (MIT) in its own venv "
+        "(lib/chatterbox_runner.py) and the ResembleAI/chatterbox weights (≈ 3.2 GB: the owner's OK per the 500 MB rule)."
     )
     capabilities = ["voice_candidates", "candidate_page", "voice_lock"]
-    supports = {"engines": ["kokoro", "chatterbox"], "chatterbox_installed": False}
+    supports = {"engines": ["kokoro", "chatterbox"], "chatterbox": "dedicated venv (lib/chatterbox_runner.py)"}
     best_for = ["one-time presenter voice design with fair A/B comparison"]
     not_good_for = ["per-video narration (use mlx_tts with the locked voice_profile)"]
     input_schema = {
@@ -113,31 +121,91 @@ class VoiceLab(BaseTool):
             built.append(rec["candidate_id"])
         raw_voice = next(iter(sorted((d / "raw").glob("voice_read.*"))), None)
         cb_ok = chatterbox_available() and raw_voice is not None
-        reason = ("chatterbox backend not installed" if not chatterbox_available() else "raw/voice_read.* missing")
+        reason = (chatterbox_unavailable_reason() if not chatterbox_available() else "raw/voice_read.* missing")
+        cb_report = None
+        cb_audio: dict[str, str] = {}
+        if cb_ok:
+            try:
+                cb_report = self._chatterbox_candidates(d, raw_voice, cdir, tts)
+                cb_audio = {c["candidate_id"]: c["file"] for c in cb_report["candidates"]}
+            except Exception as exc:  # noqa: BLE001
+                cb_ok, reason = False, f"chatterbox synthesis failed: {exc}"
         for rec in vl.CHATTERBOX_BLENDS:
             vl.validate_chatterbox_recipe(rec)
-            if not cb_ok:
-                page_items.append({"id": rec["candidate_id"], "status": "unavailable", "reason": reason,
-                                   "recipe": {"engine": "chatterbox", **{k: v for k, v in rec.items() if k != "candidate_id"}}})
+            recipe = {"engine": "chatterbox", **{k: v for k, v in rec.items() if k != "candidate_id"}}
+            if not cb_ok or rec["candidate_id"] not in cb_audio:
+                page_items.append({"id": rec["candidate_id"], "status": "unavailable", "reason": reason, "recipe": recipe})
                 continue
-            # Real Chatterbox synthesis is intentionally not faked here: the speaker-embedding
-            # interpolation API must be verified against the installed backend first (spec §5.6).
-            page_items.append({"id": rec["candidate_id"], "status": "unavailable",
-                               "reason": "chatterbox backend installed but embedding-interpolation API not yet verified",
-                               "recipe": {"engine": "chatterbox", **{k: v for k, v in rec.items() if k != "candidate_id"}}})
+            info = next(c for c in cb_report["candidates"] if c["candidate_id"] == rec["candidate_id"])
+            page_items.append({"id": rec["candidate_id"], "audio": cb_audio[rec["candidate_id"]],
+                               "recipe": {**recipe, "asr_coverage": info["asr"]["coverage"], "attempts": info["attempts"], **({"warning": info["warning"]} if info.get("warning") else {})}})
+            built.append(rec["candidate_id"])
         page = vl.write_candidates_page(cdir, page_items)
         page.chmod(0o600)
         return ToolResult(success=True, data={
             "page": str(page), "built": built,
-            "chatterbox": "unavailable — tell the owner before switching engines (spec §5.6/§9)" if not cb_ok else "needs API verification",
+            "chatterbox": ("unavailable — tell the owner before switching engines (spec §5.6/§9): " + reason) if not cb_ok else "built",
+            "chatterbox_api": (cb_report or {}).get("api"),
             "candidates": [i["id"] for i in page_items],
         })
+
+    def _chatterbox_candidates(self, d: Path, owner_ref: Path, cdir: Path, tts: Any) -> dict[str, Any]:
+        """Blend the owner's reference embedding with Kokoro donor voices (speaker-embedding interpolation, see worker docs)."""
+        import subprocess
+
+        from lib import chatterbox_runner
+
+        donors = sorted({dn["voice"] for rec in vl.CHATTERBOX_BLENDS for dn in rec["donors"]})
+        with tempfile.TemporaryDirectory() as td:
+            donor_refs: dict[str, Path] = {}
+            for v in donors:
+                res = vl.kokoro_synthesize(tts, vl.SAMPLE_PARAGRAPH, {"voices": [[v, 1.0]], "speed": 1.0})
+                p = Path(td) / f"donor_{v}.wav"
+                sf.write(str(p), np.asarray(res.audio, dtype=np.float32), int(res.sample_rate))
+                donor_refs[v] = p
+            rep = chatterbox_runner.synthesize(owner_ref, donor_refs, vl.CHATTERBOX_BLENDS, vl.SAMPLE_PARAGRAPH, Path(td) / "out")
+            # Chatterbox sometimes stops early (EOS) and drops the end of a sentence/paragraph: verify every candidate
+            # with ASR and re-synthesize the failures with a new seed (max 3 attempts), keeping the best attempt.
+            best: dict[str, dict[str, Any]] = {c["candidate_id"]: c for c in rep["candidates"]}
+            for c in best.values():
+                c["asr"] = vl.asr_coverage(Path(c["raw"]), vl.SAMPLE_PARAGRAPH)
+                c["attempts"] = 1
+            for attempt in (2, 3):
+                bad = [cid for cid, c in best.items() if c["asr"]["coverage"] < 0.92]
+                if not bad:
+                    break
+                retry = chatterbox_runner.synthesize(owner_ref, donor_refs, [r for r in vl.CHATTERBOX_BLENDS if r["candidate_id"] in bad],
+                                                     vl.SAMPLE_PARAGRAPH, Path(td) / f"out{attempt}", seed=1234 + 101 * attempt)
+                for c in retry["candidates"]:
+                    cov = vl.asr_coverage(Path(c["raw"]), vl.SAMPLE_PARAGRAPH)
+                    if cov["coverage"] > best[c["candidate_id"]]["asr"]["coverage"]:
+                        best[c["candidate_id"]] = {**c, "asr": cov}
+                    best[c["candidate_id"]]["attempts"] = attempt
+            rep["candidates"] = list(best.values())
+            for c in rep["candidates"]:
+                raw = Path(c["raw"])
+                final = cdir / f"{c['candidate_id']}.wav"
+                rec = next(r for r in vl.CHATTERBOX_BLENDS if r["candidate_id"] == c["candidate_id"])
+                src = raw
+                if abs(rec.get("pitch_semitones", 0.0)) > 1e-6:  # small pitch shift keeping duration
+                    src = Path(td) / f"{c['candidate_id']}.pitch.wav"
+                    f = 2 ** (rec["pitch_semitones"] / 12)
+                    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw), "-af", f"asetrate={int(c['sr'] * f)},aresample={c['sr']},atempo={1 / f:.6f}", str(src)],
+                                   check=True, timeout=120)
+                vl.polish(src, final)
+                final.chmod(0o600)
+                c["file"] = final.name
+                if c["asr"]["coverage"] < 0.92:
+                    c["warning"] = f"ASR coverage {c['asr']['coverage']} after {c['attempts']} attempts — audio may be truncated"
+        return rep
 
     def _lock(self, pid: str, candidate: str) -> ToolResult:
         d = pp.profile_dir(pid)
         rec = next((r for r in vl.KOKORO_BLENDS if r["candidate_id"] == candidate), None)
         if rec is None:
-            return ToolResult(success=False, error=f"candidate {candidate!r} is not a built Kokoro candidate (chatterbox candidates are unavailable)")
+            if any(r["candidate_id"] == candidate for r in vl.CHATTERBOX_BLENDS):
+                return ToolResult(success=False, error=f"candidate {candidate!r} is a Chatterbox candidate: locking/narrating with Chatterbox is not wired into mlx_tts yet (candidates are for audition only) — ask the owner before switching engines")
+            return ToolResult(success=False, error=f"candidate {candidate!r} is not a built Kokoro candidate")
         wav = d / "voice" / "candidates" / f"{candidate}.wav"
         if not wav.is_file():
             return ToolResult(success=False, error="candidate audio not found — run build_candidates first")

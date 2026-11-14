@@ -77,6 +77,34 @@ def estimate_offset_frames(mouth_open: np.ndarray, envelope: np.ndarray, max_lag
     return best_lag
 
 
+def lag_scores(mouth_open: np.ndarray, envelope: np.ndarray, max_lag: int = 10) -> list[tuple[int, float]]:
+    m = (mouth_open - mouth_open.mean()) / (mouth_open.std() + 1e-9)
+    a = (envelope - envelope.mean()) / (envelope.std() + 1e-9)
+    n = min(len(m), len(a))
+    out = []
+    for lag in range(-max_lag, max_lag + 1):
+        x, y = (m[lag:n], a[: n - lag]) if lag >= 0 else (m[: n + lag], a[-lag:n])
+        if len(x) >= 5:
+            out.append((lag, float(np.dot(x, y)) / len(x)))
+    return out
+
+
+def significant_offset(mouth_open: np.ndarray, envelope: np.ndarray, max_lag: int = 10, n_null: int = 200, seed: int = 0) -> dict[str, Any]:
+    """Best lag plus a null test: the peak correlation must beat the 95th percentile of peaks obtained with the audio
+    envelope circularly shifted by random amounts (so unrelated audio cannot 'pass'). Lip-gap vs RMS envelope is a weak
+    proxy; when the peak is not significant the check is *inconclusive* (never a pass)."""
+    scores = lag_scores(mouth_open, envelope, max_lag)
+    lag, peak = max(scores, key=lambda t: t[1])
+    rng = np.random.default_rng(seed)
+    n = min(len(mouth_open), len(envelope))
+    nulls = []
+    for _ in range(n_null):
+        sh = int(rng.integers(max(30, n // 8), max(31, n - max(30, n // 8))))
+        nulls.append(max(s for _, s in lag_scores(mouth_open, np.roll(envelope, sh), max_lag)))
+    p95 = float(np.percentile(nulls, 95))
+    return {"offset_frames": lag, "peak_correlation": round(peak, 3), "null_p95": round(p95, 3), "significant": bool(peak > p95)}
+
+
 def check_face_presence(video: Path, detector: Callable[[Image.Image], bool] | None, fps: float = 5.0) -> dict[str, Any]:
     if detector is None:
         return {"status": "not_run", "passed": None, "reason": "no face detector available (install mediapipe)"}
@@ -93,17 +121,38 @@ def check_mouth_sync(video: Path, audio: Path, fps: float,
     if mouth_series is None:
         return {"status": "not_run", "passed": None, "reason": "no mouth-landmark provider available (install mediapipe)"}
     m = mouth_series(video)
-    off = estimate_offset_frames(m, audio_envelope(audio, fps, len(m)))
-    return {"status": "run", "passed": abs(off) <= MAX_OFFSET_FRAMES, "offset_frames": off, "limit": MAX_OFFSET_FRAMES}
+    res = significant_offset(m, audio_envelope(audio, fps, len(m)))
+    if not res["significant"]:
+        return {"status": "inconclusive", "passed": None, **res, "limit": MAX_OFFSET_FRAMES,
+                "reason": "lip-gap vs audio-envelope correlation is not above the unrelated-audio null; offset not trustworthy — review by eye/ear"}
+    return {"status": "run", "passed": abs(res["offset_frames"]) <= MAX_OFFSET_FRAMES, **res, "limit": MAX_OFFSET_FRAMES}
+
+
+def default_detector() -> Callable[[Image.Image], bool] | None:
+    """MediaPipe face detector when installed and its small model files are present, else None (-> not_run)."""
+    from lib import face_tools
+
+    return face_tools.has_face if face_tools.mediapipe_available()[0] else None
+
+
+def default_mouth_series() -> Callable[[Path], np.ndarray] | None:
+    from lib import face_tools
+
+    return face_tools.mouth_series_from_video if face_tools.mediapipe_available()[0] else None
 
 
 def presenter_qa_report(asset: dict[str, Any], clip: Path, audio: Path, fps: float, raw_videos: Sequence[Path],
-                        detector: Callable | None = None, mouth_series: Callable | None = None) -> dict[str, Any]:
+                        detector: Callable | None = None, mouth_series: Callable | None = None, use_defaults: bool = True) -> dict[str, Any]:
     from lib.presenter_guard import presenter_asset_problems
+
+    if use_defaults:  # real MediaPipe checks unless the caller injected its own (tests) or opted out
+        detector = detector or default_detector()
+        mouth_series = mouth_series or default_mouth_series()
 
     problems = presenter_asset_problems(asset)
     checks = {
-        "identity": {"status": "run", "passed": not problems, "problems": problems},
+        "identity": {"status": "run", "passed": not problems, "problems": problems,
+                     **({"standin": True} if asset.get("standin") else {})},
         "face_presence": check_face_presence(clip, detector),
         "mouth_sync": check_mouth_sync(clip, audio, fps, mouth_series),
         "no_raw_frames": check_no_raw_frames(clip, raw_videos),

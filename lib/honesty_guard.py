@@ -52,13 +52,17 @@ def find_test_only_assets(*artifacts: Any) -> list[str]:
 
 def honesty_check(*artifacts: Any) -> dict[str, Any]:
     """Run the guard. ``blocking`` is False in test mode."""
+    from lib.standin import find_standin_assets
+
     offenders = find_test_only_assets(*artifacts)
+    standins = [s for s in find_standin_assets(*artifacts) if s not in offenders]
     test_mode = is_test_mode()
+    bad = bool(offenders or standins)
     return {
         "test_only_assets": offenders,
+        "standin_assets": standins,
         "test_mode": test_mode,
-        "blocking": bool(offenders) and not test_mode,
-        "issues": [
-            f"Honesty guard: test-only asset used in output: {o}" for o in offenders
-        ],
+        "blocking": bad and not test_mode,
+        "issues": [f"Honesty guard: test-only asset used in output: {o}" for o in offenders]
+        + [f"Honesty guard: stand-in presenter asset (fictional dev profile) used in output: {s}" for s in standins],
     }

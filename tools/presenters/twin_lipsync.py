@@ -43,15 +43,15 @@ class BackendUnavailable(RuntimeError):
 
 class MuseTalkMLXBackend:
     name = "musetalk_mlx"
+    last_info: dict[str, Any] = {}
 
     def lipsync(self, motion_video: Path, audio: Path, out: Path) -> None:
+        from lib import musetalk_runner
+
         ok, why = twin_backends.musetalk_mlx_available()
         if not ok:
-            raise BackendUnavailable(f"MuseTalk-MLX unavailable: {why}. Weights are ≈1.9 GB (mlx-community/MuseTalk-1.5-fp16): needs disk check + owner OK.")
-        # The MLX port exposes only the model API (256² face crop + whisper chunks → lip-synced crop);
-        # face detection/crop/paste-back and whisper chunking still have to be integrated and verified
-        # against the real weights in the P5 bake-off. Do not fake it.
-        raise BackendUnavailable("MuseTalk-MLX pre/post-processing (face crop, whisper chunks, paste-back) is not integrated yet — P5 bake-off work")
+            raise BackendUnavailable(f"MuseTalk-MLX unavailable: {why}")
+        self.last_info = musetalk_runner.lipsync(motion_video, audio, out)
 
 
 class LatentSyncBackend:
@@ -101,7 +101,7 @@ class TwinLipsync(BaseTool):
             "motion_source": {"type": "string", "description": "idle loop or performance clip (from the profile; never raw/)"},
             "segments": {"type": "array", "items": {"type": "object", "required": ["segment_id", "audio"]}},
             "output_dir": {"type": "string"},
-            "fps": {"type": "integer", "default": 30},
+            "fps": {"type": "integer", "default": 25, "description": "MuseTalk is trained at 25 fps; keep 25 for musetalk_mlx"},
         },
     }
     resource_profile = ResourceProfile(cpu_cores=4, ram_mb=8000, vram_mb=0, disk_mb=2000, network_required=False)
@@ -127,7 +127,7 @@ class TwinLipsync(BaseTool):
             return ToolResult(success=False, error=f"motion_source not found: {motion}")
         out_dir = Path(inputs["output_dir"])
         out_dir.mkdir(parents=True, exist_ok=True)
-        fps = int(inputs.get("fps", 30))
+        fps = int(inputs.get("fps", 25))
         try:
             backend = self._backend(inputs.get("backend", "musetalk_mlx"))
         except KeyError:

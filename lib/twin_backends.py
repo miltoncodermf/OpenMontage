@@ -21,27 +21,47 @@ def _dir_env(var: str, marker: str) -> tuple[bool, str]:
 
 
 def musetalk_mlx_available() -> tuple[bool, str]:
-    if importlib.util.find_spec("musetalk_mlx") is None:
-        return False, "python package `musetalk_mlx` not installed (MuseTalk-MLX port; MIT)"
-    return _dir_env("MUSETALK_MLX_DIR", "config.json")
+    from lib import musetalk_runner
+
+    return musetalk_runner.available()
 
 
 def latentsync_available() -> tuple[bool, str]:
-    return _dir_env("LATENTSYNC_DIR", "scripts")
+    """LatentSync (Apache-2.0 code, OpenRAIL++ weights) via the MLX port. NOT integrated: see reports/twin_bakeoff_dev.md."""
+    d = os.environ.get("LATENTSYNC_DIR")
+    if not d:
+        from lib.model_store import model_path
+
+        d = str(model_path("latentsync"))
+    if not (Path(d) / "checkpoints" / "latentsync_unet_mlx.safetensors").is_file():
+        return False, (f"no converted MLX weights in {d}/checkpoints (weights downloaded: latentsync_unet.pt 5 GB + whisper/tiny.pt; "
+                       "conversion/inference needs the third-party sb1992/latentsync-mlx code run in its own venv — blocked pending the owner's OK, see reports/twin_bakeoff_dev.md)")
+    return False, "converted weights present but the MediaPipe-based LatentSync face pre/post-processing worker is not integrated yet"
 
 
 def liveportrait_available() -> tuple[bool, str]:
-    return _dir_env("LIVEPORTRAIT_DIR", "inference.py")
+    from lib import liveportrait_runner
+
+    return liveportrait_runner.available()
+
+
+BIREFNET_MODEL = os.environ.get("OPENMONTAGE_MATTE_MODEL", "birefnet-general-lite")  # rembg fallback session (CPU, slow)
 
 
 def birefnet_available() -> tuple[bool, str]:
+    """Preferred: BiRefNet on MPS (lib/birefnet_mps). Fallback: rembg ONNX session (CPU, ~15x slower)."""
+    from lib import birefnet_mps
+
+    ok, why = birefnet_mps.available()
+    if ok:
+        return True, "ok (BiRefNet on MPS)"
     if importlib.util.find_spec("rembg") is None:
-        return False, "python package `rembg` not installed"
+        return False, f"{why}; and python package `rembg` not installed"
     try:
         from rembg.sessions import sessions_names
 
-        if "birefnet-portrait" not in sessions_names:
-            return False, "installed rembg has no `birefnet-portrait` session"
+        if BIREFNET_MODEL not in sessions_names:
+            return False, f"{why}; installed rembg has no `{BIREFNET_MODEL}` session"
     except Exception as exc:  # noqa: BLE001
         return False, f"rembg session check failed: {exc}"
-    return True, "ok"
+    return True, "ok (rembg ONNX fallback, CPU — slow)"

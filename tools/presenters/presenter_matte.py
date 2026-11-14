@@ -1,6 +1,6 @@
 """presenter_matte — alpha version of a presenter clip (spec §5.5 step 4).
 
-Per-frame BiRefNet portrait matting (rembg ``birefnet-portrait``, MIT) → ProRes 4444 ``.mov`` with
+Per-frame BiRefNet matting (BiRefNet on MPS, ~0.5 s/frame; rembg ONNX CPU fallback; MIT) → ProRes 4444 ``.mov`` with
 alpha, so Remotion composites the presenter as a separate layer (never baked into a plate). The
 segmenter is injectable for tests; the real one needs ``rembg`` + BiRefNet weights (owner OK ≥ 500 MB).
 """
@@ -32,10 +32,22 @@ from tools.base_tool import (
 Segmenter = Callable[[Image.Image], Image.Image]  # RGB frame -> RGBA frame
 
 
-def rembg_birefnet_segmenter() -> Segmenter:
+def default_segmenter() -> Segmenter:
+    """BiRefNet on MPS when available (≈ 0.5 s/frame), else the rembg ONNX fallback (CPU, ≈ 7 s/frame)."""
+    from lib import birefnet_mps
+
+    if birefnet_mps.available()[0]:
+        return birefnet_mps.segmenter()
+    return rembg_birefnet_segmenter()
+
+
+def rembg_birefnet_segmenter(model: str | None = None) -> Segmenter:
+    from lib.model_store import configure_cache_env
+
+    configure_cache_env()  # rembg weights live in the model store (external drive when configured)
     import rembg
 
-    session = rembg.new_session("birefnet-portrait")
+    session = rembg.new_session(model or twin_backends.BIREFNET_MODEL)
     return lambda im: rembg.remove(im, session=session).convert("RGBA")
 
 
@@ -51,7 +63,7 @@ class PresenterMatte(BaseTool):
     runtime = ToolRuntime.LOCAL_GPU
     dependencies = ["binary:ffmpeg", "python:PIL"]
     agent_skills = ["ffmpeg"]
-    install_instructions = "pip install rembg (needs a version with `birefnet-portrait`); BiRefNet weights download needs owner OK (≥500 MB)."
+    install_instructions = "pip install rembg onnxruntime; weights (birefnet-general-lite 224 MB; birefnet-portrait 973 MB needs owner OK) are cached under the model store (U2NET_HOME)."
     capabilities = ["alpha_matte_video"]
     supports = {"formats": ["prores_4444_mov"]}
     best_for = ["separate alpha presenter layer for Remotion"]
@@ -75,7 +87,7 @@ class PresenterMatte(BaseTool):
         ok, why = twin_backends.birefnet_available()
         if not ok:
             raise RuntimeError(f"BiRefNet matting unavailable: {why}")
-        return rembg_birefnet_segmenter()
+        return default_segmenter()
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         src, dst = Path(inputs["input_path"]), Path(inputs["output_path"])

@@ -31,6 +31,10 @@ def presenter_asset_problems(asset: dict[str, Any]) -> list[str]:
         problems.append("asset must originate from a presenter profile (profile_id missing)")
     if is_test_only_path(path):
         problems.append("test-only fixture path cannot be a real presenter")
+    from lib.standin import find_standin_assets
+
+    if find_standin_assets(asset):
+        problems.append("stand-in profile asset (fictional dev presenter) can never be a real presenter")
     parts = {p.lower() for p in Path(path.replace("\\", "/")).parts}
     if parts & RAW_DIR_NAMES and ("presenter_profiles" in parts or asset.get("source_type") == "owner_raw"):
         problems.append("raw owner recording cannot be rendered (onboarding source only)")

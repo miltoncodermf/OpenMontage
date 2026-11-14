@@ -45,3 +45,16 @@ def beautify_prompt(index: int) -> str:
 def wardrobe_prompt(description: str, change_hair: str | None = None) -> str:
     hair = f" and hair ({change_hair})" if change_hair else ""
     return WARDROBE_PROMPT.format(description=description, hair=hair)
+
+
+STANDIN_PORTRAIT_PROMPT = (
+    "Photoreal head-and-shoulders studio portrait of a FICTIONAL adult person — an invented face, not resembling any real "
+    "individual, celebrity or public figure. Adult in their thirties, friendly neutral expression, mouth closed, eyes to "
+    "camera, shoulders square, plain dark-grey t-shirt, soft flattering studio key light with gentle fill, plain softly "
+    "blurred neutral studio background, shallow depth of field, natural skin texture, no text, no watermark, no logo. "
+    "16:9 frame with the subject centered, medium close-up, plenty of headroom. Variation {variation}."
+)
+
+
+def standin_portrait_prompt(index: int = 0) -> str:
+    return STANDIN_PORTRAIT_PROMPT.format(variation=index + 1)

@@ -1,6 +1,8 @@
 # Optional LOCAL dependencies for the topic-tutorial pipeline (install in addition to requirements.txt).
 #   python -m pip install -r requirements-topic-tutorial.txt
 # Everything here runs offline on Apple Silicon; nothing here is a paid or cloud service.
+# Model weights are NOT installed by pip: they live in the model store (lib/model_store.py: OPENMONTAGE_MODELS_DIR,
+# else the path in ~/.openmontage/models_dir, else ~/.openmontage/models) and each >= 500 MB download needs the owner's OK.
 
 # Script-anchored caption alignment (lib/script_alignment.py): faster-whisper word times are anchored
 # onto the known script tokens -> alignment_method = "asr_anchored" (the documented default; the
@@ -8,4 +10,33 @@
 faster-whisper>=1.2
 # NOTE: tools/analysis/transcriber.py pre-decodes audio with ffmpeg (Transcriber._audio_input) instead of
 # letting faster-whisper's bundled PyAV read the file: some PyAV builds raise a `metadata_errors`
-# AttributeError on demuxed streams. Keep ffmpeg on PATH.
+# AttributeError on demuxed streams. Keep ffmpeg on PATH (lib/voice_lab.asr_coverage decodes with librosa for the same reason).
+
+# Face detection / landmarks / mouth openness (lib/face_tools.py): MediaPipe Tasks (Apache-2.0). Never InsightFace
+# (its models are non-commercial). Two small model files (<4 MB) are fetched into the model store by face_tools.ensure_models().
+mediapipe>=1.2
+
+# Presenter matte (tools/presenters/presenter_matte.py): BiRefNet (MIT) on MPS via lib/birefnet_mps.py (needs the BiRefNet
+# code clone + 444 MB weights in the model store) with the rembg ONNX session as a slow CPU fallback.
+rembg>=2.0
+onnxruntime
+timm
+einops
+kornia
+
+# MuseTalk 1.5 lip-sync (lib/musetalk_runner.py): MLX port of the neural core (MIT; 0-star repo, no LICENSE file — pyproject says MIT;
+# pinned to the commit that was reviewed). Weights mlx-community/MuseTalk-1.5-fp16 (1.9 GB) in the model store.
+librosa
+git+https://github.com/xocialize/musetalk-mlx@c6eb30ebd1ed4d043983209813370153de9346bf
+
+# LivePortrait (lib/liveportrait_runner.py + lib/_liveportrait_worker.py): code cloned into the model store (MIT), weights
+# KwaiVGI/LivePortrait liveportrait/* only (~0.7 GB). InsightFace is replaced by MediaPipe; its weights are never downloaded.
+tyro
+lmdb
+pykalman
+rich
+imageio-ffmpeg
+onnx
+
+# Chatterbox voice candidates (lib/chatterbox_runner.py) are NOT installed here: chatterbox-mlx pins torch==2.8 / transformers,
+# so it lives in a dedicated venv at <model store>/chatterbox/venv (python3.12 -m venv ... && pip install chatterbox-mlx soundfile).

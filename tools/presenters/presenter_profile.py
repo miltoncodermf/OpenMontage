@@ -49,6 +49,7 @@ class PresenterProfileTool(BaseTool):
         "type": "object",
         "required": ["operation"],
         "properties": {
+            "standin": {"type": "boolean", "default": False, "description": "init only: dev-only fictional stand-in profile; its assets can never pass final_review"},
             "operation": {"type": "string", "enum": ["init", "status", "verify", "lock", "validate_recording", "record_raw", "mint_asset", "check_asset"]},
             "profile_id": {"type": "string"},
             "display_name": {"type": "string"},
@@ -74,7 +75,7 @@ class PresenterProfileTool(BaseTool):
         op = inputs.get("operation")
         try:
             if op == "init":
-                d = pp.create_profile(inputs["profile_id"], inputs.get("display_name", ""))
+                d = pp.create_profile(inputs["profile_id"], inputs.get("display_name", ""), standin=bool(inputs.get("standin", False)))
                 return ToolResult(success=True, data={"profile_dir": str(d)})
             if op == "status":
                 prof = pp.read_profile(inputs["profile_id"])

@@ -160,6 +160,7 @@
           "description": "topic-tutorial honesty guard: fixtures/test-only assets must never count as real output.",
           "properties": {
             "test_only_assets": { "type": "array", "items": { "type": "string" } },
+            "standin_assets": { "type": "array", "items": { "type": "string" } },
             "test_mode": { "type": "boolean" },
             "blocking": { "type": "boolean" },
             "issues": { "type": "array", "items": { "type": "string" } }

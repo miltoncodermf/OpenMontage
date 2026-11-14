@@ -6,6 +6,8 @@
   "type": "object",
   "required": ["version", "profile_id", "locked", "files"],
   "properties": {
+    "standin": { "type": "boolean", "description": "Dev-only stand-in (fictional person) used to validate engines. Assets from it can NEVER pass final_review outside test mode and never count as a real presenter." },
+    "standin_note": { "type": "string" },
     "version": { "type": "string", "const": "1.0" },
     "profile_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
     "display_name": { "type": "string" },

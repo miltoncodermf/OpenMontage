@@ -47,23 +47,20 @@ def laplacian_variance(path: Path) -> float:
 
 
 def _mediapipe_faces():
-    try:
-        import mediapipe as mp  # noqa: F401
-        return mp.solutions.face_detection
-    except Exception:  # noqa: BLE001
-        return None
+    """True when the MediaPipe Tasks face detector is usable (no InsightFace)."""
+    from lib import face_tools
+
+    return face_tools.mediapipe_available()[0] or None
 
 
 def detect_face_score(path: Path) -> float | None:
-    """Best face-detection confidence (0..1), or None when MediaPipe is not installed."""
-    fd = _mediapipe_faces()
-    if fd is None:
+    """Best face-detection confidence (0..1), or None when MediaPipe is not usable."""
+    if not _mediapipe_faces():
         return None
-    import mediapipe as mp  # noqa: F401
+    from lib import face_tools
 
-    with fd.FaceDetection(model_selection=1, min_detection_confidence=0.5) as det:
-        res = det.process(np.asarray(Image.open(path).convert("RGB")))
-    return max((d.score[0] for d in (res.detections or [])), default=0.0)
+    faces = face_tools.detect_faces(Image.open(path).convert("RGB"))
+    return faces[0]["score"] if faces else 0.0
 
 
 class TwinIdentity(BaseTool):
@@ -84,15 +81,15 @@ class TwinIdentity(BaseTool):
         "(Apache-2.0) for face detection. Set ALLOW_PAID_APIS=true only for an approved run."
     )
     fallback_tools: list[str] = []
-    capabilities = ["extract_stills", "beautify_portrait", "wardrobe_variant", "pick_canonical"]
-    supports = {"operations": ["extract_stills", "beautify", "wardrobe", "pick_canonical"], "license_note": "MediaPipe Apache-2.0; no InsightFace weights"}
+    capabilities = ["extract_stills", "beautify_portrait", "wardrobe_variant", "pick_canonical", "standin_portrait"]
+    supports = {"operations": ["extract_stills", "beautify", "wardrobe", "pick_canonical", "standin_portrait"], "license_note": "MediaPipe Apache-2.0; no InsightFace weights"}
     best_for = ["building and extending the owner's beautified identity from his own stills"]
     not_good_for = ["rendering raw owner footage (never allowed)"]
     input_schema = {
         "type": "object",
         "required": ["operation", "profile_id"],
         "properties": {
-            "operation": {"type": "string", "enum": ["extract_stills", "beautify", "wardrobe", "pick_canonical"]},
+            "operation": {"type": "string", "enum": ["extract_stills", "beautify", "wardrobe", "pick_canonical", "standin_portrait"]},
             "profile_id": {"type": "string"},
             "count": {"type": "integer", "default": 5},
             "model": {"type": "string", "default": DEFAULT_IMAGE_MODEL},
@@ -149,6 +146,8 @@ class TwinIdentity(BaseTool):
                 return self._wardrobe(d, pid, inputs)
             if op == "pick_canonical":
                 return self._pick(d, pid, inputs)
+            if op == "standin_portrait":
+                return self._standin_portrait(d, pid, inputs)
             return ToolResult(success=False, error=f"unknown operation {op!r}")
         except (pp.ProfileError, KeyError) as exc:
             return ToolResult(success=False, error=str(exc))
@@ -253,6 +252,29 @@ class TwinIdentity(BaseTool):
         cat_path.write_text(json.dumps(catalog, indent=2))
         cat_path.chmod(0o600)
         return ToolResult(success=True, data={"variant": vid, "image": str(out), "catalog_size": len(catalog)})
+
+    def _standin_portrait(self, d: Path, pid: str, inputs: dict[str, Any]) -> ToolResult:
+        """Generate a FICTIONAL portrait for a stand-in profile (dev only; never a real person's likeness)."""
+        from lib.twin_prompts import standin_portrait_prompt
+
+        if not pp.read_profile(pid).get("standin"):
+            return ToolResult(success=False, error="standin_portrait only works on profiles created with standin: true")
+        blocked = self._guard_paid(inputs)
+        if blocked:
+            return ToolResult(success=False, error=blocked)
+        model = inputs.get("model", DEFAULT_IMAGE_MODEL)
+        est = self.estimate_cost({"operation": "wardrobe", "model": model})  # one call
+        cap = inputs.get("budget_cap_usd")
+        if cap is not None and float(inputs.get("actual_spent_usd", 0)) + est > float(cap):
+            return ToolResult(success=False, error=f"dev budget cap ${float(cap):.2f} would be exceeded")
+        cdir = d / "identity" / "candidates"
+        cdir.mkdir(parents=True, exist_ok=True)
+        out = cdir / f"cand_{int(inputs.get('index', 0)) + 1:02d}.png"
+        res = self._call_image(d, standin_portrait_prompt(int(inputs.get("index", 0))), [], out, model)
+        if not res.success:
+            return ToolResult(success=False, error=res.error)
+        return ToolResult(success=True, cost_usd=res.cost_usd, data={"candidate": out.stem, "path": str(out), "model": model,
+                                                                      "estimated_usd": est, "reported_cost_usd": res.cost_usd})
 
     def _pick(self, d: Path, pid: str, inputs: dict[str, Any]) -> ToolResult:
         cand = d / "identity" / "candidates" / f"{inputs.get('candidate', '')}.png"

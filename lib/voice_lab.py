@@ -157,3 +157,24 @@ def build_voice_profile(candidate: dict[str, Any], *, model_version: str, seed: 
         prof["watermark_note"] = "Chatterbox outputs carry an inaudible Perth watermark (accepted)."
         prof["embedding"] = candidate.get("embedding")
     return prof
+
+
+def _words(text: str) -> list[str]:
+    import re
+
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def asr_coverage(wav: Path, text: str, model_size: str = "base") -> dict[str, Any]:
+    """Share of the target paragraph's words that an ASR pass recovers in order (catches Chatterbox's occasional early-EOS truncation)."""
+    import difflib
+
+    import librosa
+    from faster_whisper import WhisperModel
+
+    y, _ = librosa.load(str(wav), sr=16000)  # decode with librosa (PyAV in some builds rejects faster-whisper's open() kwargs)
+    segs, _ = WhisperModel(model_size, device="cpu", compute_type="int8").transcribe(y, language="en")
+    heard, target = _words(" ".join(s.text for s in segs)), _words(text)
+    sm = difflib.SequenceMatcher(a=target, b=heard, autojunk=False)
+    matched = sum(b.size for b in sm.get_matching_blocks())
+    return {"coverage": round(matched / max(1, len(target)), 3), "heard": " ".join(heard)}
