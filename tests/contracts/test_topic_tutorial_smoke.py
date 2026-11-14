@@ -67,6 +67,7 @@ def _compile(narr, with_presenter: bool):
 
 def _render(narr, compiled, name: str) -> Path:
     from lib import loudness
+    from lib.heavy_lock import heavy_job
     from tools.video.video_compose import VideoCompose
 
     work, data = narr
@@ -76,7 +77,11 @@ def _render(narr, compiled, name: str) -> Path:
     ed = {**compiled["edit_decisions"], "cuts": compiled["cuts"], "captions": compiled["captions"], "canvas": compiled["canvas"],
           "audio": {"narration": {"src": str(mastered)}}, "total_duration_seconds": data["duration_s"]}
     out = work / f"{name}.mp4"
-    res = VideoCompose()._remotion_render({"edit_decisions": ed, "output_path": str(out)})
+    # Cold-start hardening (fix round 1, group C): Remotion's default 30 s browser-setup timeout can trip on a
+    # cold headless-Chrome launch, and two concurrent heavy runs (e.g. a second pytest session or a real render)
+    # would fight for CPU/RAM — queue behind the host-wide heavy lock instead of racing it.
+    with heavy_job("topic_tutorial_smoke:render", wait=900):
+        res = VideoCompose()._remotion_render({"edit_decisions": ed, "output_path": str(out), "remotion_timeout_ms": 180_000})
     _need(res.success or "Chrome" not in (res.error or ""), f"Remotion cannot render here: {(res.error or '')[-300:]}")
     assert res.success, res.error
     compiled["_ed"] = ed
