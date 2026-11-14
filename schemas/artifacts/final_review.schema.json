@@ -130,6 +130,21 @@
             }
           }
         },
+        "loudness": {
+          "type": "object",
+          "description": "EBU R128 check (topic-tutorial): integrated LUFS and true peak vs target.",
+          "properties": {
+            "integrated_lufs": { "type": "number" },
+            "true_peak_dbtp": { "type": "number" },
+            "lra": { "type": "number" },
+            "threshold": { "type": "number" },
+            "target_lufs": { "type": "number" },
+            "tolerance_lu": { "type": "number" },
+            "true_peak_limit_dbtp": { "type": "number" },
+            "within_target": { "type": ["boolean", "null"] },
+            "issues": { "type": "array", "items": { "type": "string" } }
+          }
+        },
         "honesty_guard": {
           "type": "object",
           "description": "topic-tutorial honesty guard: fixtures/test-only assets must never count as real output.",

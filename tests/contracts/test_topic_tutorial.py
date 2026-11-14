@@ -1934,3 +1934,184 @@ class TestV3ScriptAlignerTool:
         res = tool.execute({"audio_path": str(wav), "text": "hello there general kenobi"})
         assert res.success and res.data["alignment_method"] == "heuristic" and "ASR unavailable" in res.data["fallback_reason"]
         assert len(res.data["timestamps"]) == 4
+
+
+# ---------------------------------------------------------------------------
+# v3 fast checks (P7): aspect seam, focus region, legibility, loudness, final review
+# ---------------------------------------------------------------------------
+
+V3_PLAN = {
+    "version": "2.0",
+    "presenter_policy": {"enabled": True, "preferred_source": "twin_auto", "fallback": "visual_explainer", "pip_allowed": True},
+    "sections": [
+        {"section_id": "a", "script_section_id": "s1", "learning_objective": "Hook", "visual_beats": [
+            {"beat_id": "b1", "visual_type": "presenter_fullscreen", "duration_hint_seconds": 5.0, "title": "Hello"}]},
+        {"section_id": "b", "script_section_id": "s2", "learning_objective": "Architecture", "visual_beats": [
+            {"beat_id": "b2", "visual_type": "diagram", "duration_hint_seconds": 6.0, "layout": {"preset": "diagram", "presenter_pip": True},
+             "focus_region": {"x": 0.6, "y": 0.55, "w": 0.35, "h": 0.35},
+             "diagram_spec": {"title": "Flow", "nodes": ["A", "B", "C"], "edges": [["A", "B"], ["B", "C"]]}}]},
+    ],
+}
+REAL_PRESENTER = {"asset_id": "p1", "asset_type": "presenter_video", "path": "assets/presenter/twin.mp4", "identity_transform": "beautified", "profile_id": "owner"}
+REAL_MATTE = {"asset_id": "m1", "asset_type": "presenter_matte", "path": "assets/presenter/twin_alpha.mov", "identity_transform": "beautified", "profile_id": "owner"}
+
+
+class TestV3AspectSeam:
+    @pytest.mark.parametrize("canvas", [{"width": 1920, "height": 1080}, {"width": 1080, "height": 1920}])
+    def test_same_plan_compiles_for_16_9_and_9_16(self, canvas):
+        from tools.video.scene_plan_adapter import ScenePlanAdapter
+
+        compiled = ScenePlanAdapter().compile(V3_PLAN, {"assets": [REAL_PRESENTER]}, [], {"s1": 5.0, "s2": 6.0}, canvas=canvas)
+        assert compiled["canvas"] == canvas
+        assert compiled["edit_decisions"]["metadata"]["aspect"] == ("portrait" if canvas["height"] > canvas["width"] else "landscape")
+        pip_cut = next(c for c in compiled["cuts"] if c.get("presenterPip"))
+        px = pip_cut["layoutPx"]["pip"]
+        assert 0 <= px["x"] and px["x"] + px["w"] <= canvas["width"] and px["y"] + px["h"] <= canvas["height"]
+        assert compiled["visual_analytics"]["presenter_percentage"] > 0.0  # real (beautified, profile-sourced) presenter counts
+        assert compiled["visual_analytics"]["legibility_problems"] == []
+        assert compiled["edit_decisions"]["metadata"]["loudness_target_lufs"] == -14.0
+
+    def test_alpha_matte_is_preferred_and_flagged(self):
+        from tools.video.scene_plan_adapter import ScenePlanAdapter
+
+        compiled = ScenePlanAdapter().compile(V3_PLAN, {"assets": [REAL_PRESENTER, REAL_MATTE]}, [], {"s1": 5.0, "s2": 6.0})
+        pres = [c for c in compiled["cuts"] if c.get("presenterVideo")]
+        assert pres and all(c["presenterAlpha"] is True and c["presenterVideo"].endswith("twin_alpha.mov") for c in pres)
+        plain = ScenePlanAdapter().compile(V3_PLAN, {"assets": [REAL_PRESENTER]}, [], {"s1": 5.0, "s2": 6.0})
+        assert all(c["presenterAlpha"] is False for c in plain["cuts"] if c.get("presenterVideo"))
+
+    def test_pip_moves_off_the_focus_region(self):
+        from lib import layout
+        from tools.video.scene_plan_adapter import ScenePlanAdapter
+
+        canvas = {"width": 1920, "height": 1080}
+        focus = V3_PLAN["sections"][1]["visual_beats"][0]["focus_region"]  # bottom-right content
+        assert layout.covers_focus(layout.pip_rect("bottom-right", 0.25, canvas), focus)
+        compiled = ScenePlanAdapter().compile(V3_PLAN, {"assets": [REAL_PRESENTER]}, [], {"s1": 5.0, "s2": 6.0})
+        cut = next(c for c in compiled["cuts"] if c.get("presenterPip"))
+        assert cut["presenterPipPosition"] != "bottom-right" and cut["focusRegion"] == focus
+        assert not layout.covers_focus(layout.pip_rect(cut["presenterPipPosition"], 0.25, canvas), focus)
+        assert "layoutWarning" not in cut
+
+    def test_focus_region_validation(self):
+        from lib.layout import validate_focus_region
+        from schemas.artifacts import validate_artifact
+        import jsonschema
+
+        assert validate_focus_region({"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}) == []
+        assert validate_focus_region({"x": 0.8, "y": 0.1, "w": 0.5, "h": 0.5})
+        assert validate_focus_region({"x": 0, "y": 0, "w": 0, "h": 1})
+        bad = json.loads(json.dumps(V3_PLAN))
+        bad["sections"][1]["visual_beats"][0]["focus_region"] = {"x": 2, "y": 0, "w": 1, "h": 1}
+        with pytest.raises(jsonschema.ValidationError):
+            validate_artifact("scene_plan", bad)
+        validate_artifact("scene_plan", V3_PLAN)
+
+    def test_new_beat_types_compile_with_assets(self):
+        from tools.video.scene_plan_adapter import ScenePlanAdapter
+
+        plan = {"version": "2.0", "sections": [{"section_id": "a", "script_section_id": "s1", "visual_beats": [
+            {"beat_id": "c1", "visual_type": "sandbox_capture", "duration_hint_seconds": 4.0,
+             "capture_script": {"capture_id": "c1", "surface": "terminal", "steps": [{"action": "pause", "seconds": 1}]}},
+            {"beat_id": "i1", "visual_type": "sourced_image", "duration_hint_seconds": 4.0},
+            {"beat_id": "k1", "visual_type": "sourced_clip", "duration_hint_seconds": 4.0}]}]}
+        rights = {"rights_status": "open_licensed", "license": "CC0", "source_url": "https://u", "attribution": "x", "retrieved_at": "t"}
+        assets = {"assets": [{"asset_id": "cap", "asset_type": "sandbox_capture", "path": "assets/captures/c1/capture.mp4"},
+                             {"asset_id": "img", "asset_type": "sourced_image", "path": "assets/images/a.jpg", **rights},
+                             {"asset_id": "clip", "asset_type": "sourced_clip", "path": "assets/video/a.mp4", **rights}]}
+        compiled = ScenePlanAdapter().compile(plan, assets, [], {"s1": 12.0})
+        assert [c["source"] for c in compiled["cuts"]] == ["assets/captures/c1/capture.mp4", "assets/images/a.jpg", "assets/video/a.mp4"]
+        with pytest.raises(ValueError, match="no sandbox_capture asset"):
+            ScenePlanAdapter().compile(plan, {"assets": []}, [], {"s1": 12.0})
+
+
+class TestV3DiagramLegibility:
+    def test_sizes_scale_with_canvas_height_and_match_remotion_constants(self):
+        import re
+        from lib import diagram_legibility as dl
+
+        assert dl.font_sizes(1080) == {"label": 28, "title": 44, "sublabel": 22, "edge_label": 22}
+        assert dl.font_sizes(2160)["label"] == 56
+        ts = (REPO_ROOT / "remotion-composer" / "src" / "layouts" / "diagramMetrics.ts").read_text()
+        for const, val in (("MIN_LABEL_PX", dl.MIN_LABEL_PX), ("MIN_TITLE_PX", dl.MIN_TITLE_PX), ("MIN_SUBLABEL_PX", dl.MIN_SUBLABEL_PX),
+                           ("MIN_EDGE_LABEL_PX", dl.MIN_EDGE_LABEL_PX), ("MAX_NODES_PER_BEAT", dl.MAX_NODES_PER_BEAT), ("MIN_CONTRAST", dl.MIN_CONTRAST)):
+            assert float(re.search(rf"{const} = ([0-9.]+)", ts).group(1)) == val, const
+
+    def test_validator_flags_node_count_contrast_and_long_labels(self):
+        from lib import diagram_legibility as dl
+
+        canvas = {"width": 1920, "height": 1080}
+        ok = {"title": "t", "nodes": ["A", "B", "C"]}
+        assert dl.validate_diagram_spec(ok, canvas) == []
+        assert any("8 nodes" in p for p in dl.validate_diagram_spec({"nodes": [str(i) for i in range(8)]}, canvas))
+        assert any("contrast" in p for p in dl.validate_diagram_spec(ok, canvas, text_color="#334155"))
+        assert any("not a hex" in p for p in dl.validate_diagram_spec(ok, canvas, text_color="red"))
+        assert any("chars" in p for p in dl.validate_diagram_spec({"nodes": ["x" * 50]}, canvas))
+        assert dl.contrast_ratio("#FFFFFF", "#000000") == pytest.approx(21.0)
+        assert dl.contrast_ratio("#F8FAFC", "#1E293B") >= dl.MIN_CONTRAST
+
+    def test_oversized_diagram_is_split_progressively_in_the_adapter(self):
+        from lib.diagram_legibility import split_diagram_spec
+        from tools.video.scene_plan_adapter import ScenePlanAdapter
+
+        nodes = [f"N{i}" for i in range(9)]
+        spec = {"title": "Big", "nodes": nodes, "edges": [[nodes[i], nodes[i + 1]] for i in range(8)]}
+        chunks = split_diagram_spec(spec)
+        assert [len(c["nodes"]) for c in chunks] == [7, 2] and chunks[0]["title"] == "Big (1/2)"
+        plan = {"version": "2.0", "sections": [{"section_id": "a", "script_section_id": "s1", "visual_beats": [
+            {"beat_id": "d", "visual_type": "diagram", "duration_hint_seconds": 8.0, "diagram_spec": spec}]}]}
+        compiled = ScenePlanAdapter().compile(plan, {"assets": []}, [], {"s1": 8.0})
+        assert len(compiled["cuts"]) == 2 and all(len(c["diagramSpec"]["nodes"]) <= 7 for c in compiled["cuts"])
+        assert abs((compiled["cuts"][0]["out_seconds"] - compiled["cuts"][0]["in_seconds"]) - 4.0) < 0.05
+        assert compiled["visual_analytics"]["legibility_problems"] == []
+
+
+class TestV3LoudnessAndFinalReview:
+    def _video(self, path, db, seconds=5):
+        import subprocess
+
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc=size=320x180:rate=30:duration={seconds}",
+                        "-f", "lavfi", "-i", f"sine=frequency=300:duration={seconds}", "-af", f"volume={db}dB",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", str(path)], check=True)
+        return path
+
+    def test_two_pass_mastering_hits_target(self, tmp_path):
+        from lib import loudness
+
+        src = self._video(tmp_path / "quiet.mp4", -30)
+        before = loudness.measure(src)
+        assert not loudness.within_target(before)
+        res = loudness.master_two_pass(src, tmp_path / "mastered.mp4")
+        assert res["within_target"] and abs(res["after"]["integrated_lufs"] - -14.0) <= 1.0 and res["after"]["true_peak_dbtp"] <= -1.0
+
+    def test_final_review_loudness_and_honesty_guard(self, tmp_path, monkeypatch):
+        from lib import loudness
+        from tools.video.video_compose import VideoCompose
+
+        monkeypatch.delenv("OPENMONTAGE_TEST_MODE", raising=False)
+        quiet = self._video(tmp_path / "quiet.mp4", -30)
+        loud_ok = loudness.master_two_pass(quiet, tmp_path / "ok.mp4")["output"]
+        ed = {"metadata": {"loudness_target_lufs": -14.0}, "cuts": []}
+        vc = VideoCompose()
+        bad = vc._run_final_review(quiet, ed)
+        assert bad["checks"]["loudness"]["within_target"] is False and bad["status"] == "revise"
+        good = vc._run_final_review(Path(loud_ok), ed)
+        assert good["checks"]["loudness"]["within_target"] is True and good["checks"]["honesty_guard"]["blocking"] is False
+        assert good["status"] == "pass"
+        # a TEST_ONLY asset anywhere in the edit decisions or manifest fails the review outright
+        fixture_ed = {**ed, "cuts": [{"source": "tests/fixtures/topic_tutorial/TEST_ONLY_presenter_fixture.mp4"}]}
+        failed = vc._run_final_review(Path(loud_ok), fixture_ed)
+        assert failed["status"] == "fail" and failed["recommended_action"] == "replace_test_assets"
+        failed2 = vc._run_final_review(Path(loud_ok), ed, asset_manifest={"assets": [{"path": "assets/TEST_ONLY_x.mp4"}]})
+        assert failed2["status"] == "fail"
+        # explicit test mode downgrades to an issue note
+        monkeypatch.setenv("OPENMONTAGE_TEST_MODE", "1")
+        assert vc._run_final_review(Path(loud_ok), fixture_ed)["status"] == "pass"
+
+    def test_final_review_validates_against_schema(self, tmp_path):
+        from schemas.artifacts import validate_artifact
+        from tools.video.video_compose import VideoCompose
+
+        v = self._video(tmp_path / "v.mp4", -14)
+        rev = VideoCompose()._run_final_review(v, {"metadata": {"loudness_target_lufs": -14.0}, "cuts": []})
+        validate_artifact("final_review", rev)

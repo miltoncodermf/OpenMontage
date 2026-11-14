@@ -2754,6 +2754,25 @@ class VideoCompose(BaseTool):
         )
         issues.extend(transcript_comparison.get("issues", []))
 
+        # --- 6a. EBU R128 loudness (topic-tutorial: -14 LUFS ±1, TP <= -1 dBTP) ---
+        loudness_check: dict[str, Any] | None = None
+        target_lufs = ((edit_decisions or {}).get("metadata") or {}).get("loudness_target_lufs")
+        if target_lufs is not None and technical_probe.get("has_audio"):
+            try:
+                from lib.loudness import LUFS_TOLERANCE, TP_LIMIT, measure, within_target
+
+                m = measure(output_path)
+                ok = within_target(m, float(target_lufs))
+                loudness_check = {**m, "target_lufs": float(target_lufs), "tolerance_lu": LUFS_TOLERANCE,
+                                  "true_peak_limit_dbtp": TP_LIMIT, "within_target": ok, "issues": []}
+                if not ok:
+                    loudness_check["issues"].append(
+                        f"Loudness out of target: {m['integrated_lufs']:.1f} LUFS / {m['true_peak_dbtp']:.1f} dBTP "
+                        f"(target {float(target_lufs):.0f} ±{LUFS_TOLERANCE:.0f} LUFS, TP <= {TP_LIMIT:.0f} dBTP)")
+            except Exception as e:  # noqa: BLE001
+                loudness_check = {"within_target": None, "issues": [f"Loudness measurement not run: {e}"]}
+            issues.extend(loudness_check["issues"])
+
         # --- 6b. Honesty guard (topic-tutorial): fixtures never count as real ---
         from lib.honesty_guard import honesty_check
 
@@ -2764,7 +2783,7 @@ class VideoCompose(BaseTool):
         critical_issues = [
             i for i in issues
             if any(kw in i.lower() for kw in [
-                "silent downgrade", "delivery promise violation",
+                "silent downgrade", "delivery promise violation", "loudness out of target",
                 "effectively silent", "ffprobe failed", "suspiciously short",
                 "tts punctuation leak",  # reading literal punctuation aloud
             ])
@@ -2800,6 +2819,7 @@ class VideoCompose(BaseTool):
                 "subtitle_check": subtitle_check,
                 "transcript_comparison": transcript_comparison,
                 "honesty_guard": honesty,
+                **({"loudness": loudness_check} if loudness_check is not None else {}),
             },
             "issues_found": issues,
             "recommended_action": recommended_action,

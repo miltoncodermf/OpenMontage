@@ -275,6 +275,12 @@ interface Cut {
   diagramSpec?: DiagramSpec;
   // Presenter props (type: "presenter_fullscreen", "presenter_screen_split", or presenterPip overlay)
   presenterVideo?: string;
+  /** Presenter clip is an alpha matte (ProRes 4444 / VP9): composited as a separate layer over a backdrop. */
+  presenterAlpha?: boolean;
+  /** Corner chosen by the adapter so the PIP never covers focusRegion. */
+  presenterPipPosition?: "bottom-right" | "bottom-left" | "top-right" | "top-left";
+  /** Normalized focus region {x,y,w,h} of what matters in this beat (spec §5.9). */
+  focusRegion?: { x: number; y: number; w: number; h: number };
   presenterStartFrom?: number;
   presenterPip?: boolean | { position?: "bottom-right" | "bottom-left" | "top-right" | "top-left"; pipWidthPercent?: number; label?: string };
   presenterLabel?: string;
@@ -629,6 +635,8 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
           subtitle={cut.subtitle}
           accentColor={accent}
           textColor={textColor}
+          alpha={cut.presenterAlpha}
+          backdropColor={theme.backgroundColor || "#0F172A"}
         />
       );
     }
@@ -831,6 +839,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         presenterSide={cut.presenterSide || "left"}
         splitRatio={cut.splitRatio || 0.35}
         accentColor={accent}
+        alpha={cut.presenterAlpha}
       >
         {coreElement}
       </PresenterScreenSplit>
@@ -839,7 +848,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
 
   // If PIP presenter overlay is requested on top of this scene
   if (cut.presenterPip && cut.presenterVideo) {
-    const pipPos = typeof cut.presenterPip === "object" ? cut.presenterPip.position : "bottom-right";
+    const pipPos = typeof cut.presenterPip === "object" ? cut.presenterPip.position : cut.presenterPipPosition || "bottom-right";
     const pipW = typeof cut.presenterPip === "object" ? cut.presenterPip.pipWidthPercent : 25;
     const pipLabel = typeof cut.presenterPip === "object" ? cut.presenterPip.label : cut.presenterLabel;
     return (
@@ -850,6 +859,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         pipWidthPercent={pipW || 25}
         accentColor={accent}
         label={pipLabel}
+        alpha={cut.presenterAlpha}
       >
         {coreElement}
       </PresenterPip>

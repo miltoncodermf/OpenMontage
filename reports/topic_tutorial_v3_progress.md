@@ -116,3 +116,18 @@ Real run evidence: Kokoro narration (10 s) → `script_aligner` with faster-whis
 Not run: any real twin segment, real face/mouth QA (no MediaPipe), real overnight resume with a backend.
 
 Acceptance (fast): alignment (numbers/punctuation, fallback flags), cache invalidation per field, QA math + raw-frame detection + not_run semantics, fallback re-plan, aligner tool → `tests/contracts/test_topic_tutorial.py` 99 passed; `tests/contracts` all green.
+
+## Phase 7 — Edit/compose, legibility, aspect seam (code complete; no real render yet)
+
+Done:
+- **Normalized layout + aspect seam (§5.9):** `remotion-composer/src/layouts/{types,landscape,portrait,index,diagramMetrics}.ts` (16:9 implemented; `portrait.ts` is the deliberately trivial 9:16 slot) and a Python mirror `lib/layout.py`. `Root.tsx` `calculateMetadata` reads `props.canvas` for width/height. `PresenterPip` / `PresenterScreenSplit` / `PresenterFullScreen` now take their rectangles from the layout and support `alpha` (OffthreadVideo `transparent`, backdrop → presenter → captions layer stack); `DiagramScene` rewritten on the layout grid with legibility metrics. `tsc --noEmit` passes.
+- **Scene plan / adapter:** `focus_region` (normalized, validated) on beats; new beat types `sandbox_capture`, `sourced_image`, `sourced_clip` (adapter requires matching assets); `compile(..., canvas=)` → `canvas`, per-cut `layoutPx`, `focusRegion`, `presenterAlpha` (matte preferred), PIP corner chosen so it never covers the focus region; oversized diagrams (> 7 nodes) split into progressive-reveal beats; `visual_analytics.legibility_problems`.
+- **Diagram legibility validator** `lib/diagram_legibility.py`: at 1080p labels ≥ 28 px, titles ≥ 44 px (scales with canvas height), contrast ≥ 4.5:1, ≤ 7 nodes/beat, label length; constants kept in sync with the TS file by a test. The old diagrams (22 px labels, 14 px sublabels) failed this; the rewritten component uses 28/44/22/22 px at 1080p.
+- **R128:** `lib/loudness.py` (measure + two-pass `master_two_pass`; −14 LUFS ±1, TP ≤ −1 dBTP). Real check on a synthetic −51.9 LUFS tone → −13.95 LUFS after two-pass. `VideoCompose._run_final_review` adds `checks.loudness` (when `metadata.loudness_target_lufs` is set; out-of-target → `revise`) next to the honesty guard from P0 (TEST_ONLY asset → `fail`); `final_review` schema updated.
+- Skills updated (`edit-director`, `compose-director`).
+
+Not run: a real Remotion render of the new components with a real alpha presenter (needs a real twin clip) — the P8 smoke test renders a diagram + `TEST_ONLY_` layer clip.
+
+Acceptance (fast): 16:9 and 9:16 compile of the same plan, matte/alpha, focus-region PIP move, beat types, focus validation, legibility validator + TS sync, diagram splitting, two-pass mastering, final-review loudness + honesty fail/pass, schema → `tests/contracts/test_topic_tutorial.py` 111 passed; `tests/contracts` 1669 passed, 9 skipped. Whole `tests/` (excluding `tests/tools/test_gemini_omni_video.py`): 3051 passed, 14 skipped.
+
+Pre-existing, not caused by this branch: `tests/tools/test_gemini_omni_video.py` has 25 failures on `main` too (schema `model` enum no longer matches what the test expects); files untouched here. Follow-up for the owner.

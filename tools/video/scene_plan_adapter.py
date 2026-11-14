@@ -36,6 +36,7 @@ class ScenePlanAdapter:
         asset_manifest: dict[str, Any],
         audio_items: list[dict[str, Any]],
         padded_durations: dict[str, float],
+        canvas: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Compile scene plan and assets into Remotion cuts, all_captions, and edit_decisions.
 
@@ -49,13 +50,36 @@ class ScenePlanAdapter:
         # Ensure v2 IR format
         from lib.scene_plan_migration import migrate_scene_plan_v1_to_v2
         plan_v2 = migrate_scene_plan_v1_to_v2(scene_plan)
+        from lib import layout as nlayout
+        from lib.diagram_legibility import split_diagram_spec
+        from lib.diagram_legibility import validate_cuts as validate_diagram_cuts
+
+        plan_c = plan_v2.get("canvas") or {}
+        canvas = dict(canvas or {"width": plan_c.get("width", 1920), "height": plan_c.get("height", 1080)})
+        # Oversized diagrams become progressive-reveal beats (<= 7 nodes each).
+        for _sec in plan_v2.get("sections", []):
+            _beats = []
+            for _b in _sec.get("visual_beats", []):
+                _spec = _b.get("diagram_spec")
+                if _b.get("visual_type") == "diagram" and _spec and len(_spec.get("nodes") or []) > 7:
+                    _chunks = split_diagram_spec(_spec)
+                    for _k, _chunk in enumerate(_chunks, 1):
+                        _nb = dict(_b)
+                        _nb["beat_id"] = f"{_b.get('beat_id', 'beat')}_p{_k}"
+                        _nb["diagram_spec"] = _chunk
+                        _nb["duration_hint_seconds"] = float(_b.get("duration_hint_seconds", 4.0)) / len(_chunks)
+                        _beats.append(_nb)
+                else:
+                    _beats.append(_b)
+            _sec["visual_beats"] = _beats
 
         # Index assets by id, type, and scene_ids
         assets = asset_manifest.get("assets", [])
         asset_by_id = {a.get("asset_id") or a.get("id"): a for a in assets}
         presenter_assets = [
-            a for a in assets if (a.get("asset_type") or a.get("type")) in ("presenter_video", "presenter")
+            a for a in assets if (a.get("asset_type") or a.get("type")) in ("presenter_video", "presenter", "presenter_matte")
         ]
+        presenter_assets.sort(key=lambda a: 0 if (a.get("asset_type") or a.get("type")) == "presenter_matte" else 1)  # alpha layer first
         default_presenter_video = presenter_assets[0]["path"] if presenter_assets else None
         from lib.presenter_guard import is_real_presenter_asset
 
@@ -133,12 +157,16 @@ class ScenePlanAdapter:
                         req_name = req if isinstance(req, str) else req.get("id") or req.get("type")
                         if req_name in asset_by_id:
                             cand = asset_by_id[req_name]
-                            if (cand.get("asset_type") or cand.get("type")) in ("presenter_video", "presenter"):
+                            if (cand.get("asset_type") or cand.get("type")) in ("presenter_video", "presenter", "presenter_matte"):
                                 presenter_path = cand.get("path")
                                 break
                     if not presenter_path:
                         presenter_path = default_presenter_video
 
+                presenter_is_alpha = any(
+                    a.get("path") == presenter_path and (a.get("asset_type") or a.get("type")) == "presenter_matte"
+                    for a in presenter_assets
+                ) if presenter_path else False
                 if presenter_path and self.project_dir and not Path(presenter_path).is_absolute():
                     presenter_path = str((self.project_dir / presenter_path).resolve())
 
@@ -162,12 +190,25 @@ class ScenePlanAdapter:
                     "captions": scene_local_captions,
                 }
 
+                focus = beat.get("focus_region")
+                if focus is not None:
+                    bad = nlayout.validate_focus_region(focus)
+                    if bad:
+                        raise ValueError(f"beat '{beat_id}': {'; '.join(bad)}")
+                    cut["focusRegion"] = focus
                 if presenter_path:
+                    cut["presenterAlpha"] = bool(presenter_is_alpha)
                     cut["presenterVideo"] = presenter_path
                     cut["presenterStartFrom"] = 0.0
                     if pip_requested:
                         cut["presenterPip"] = True
                         cut["presenterLabel"] = "Presenter"
+                        pos, covers = nlayout.choose_pip_position("bottom-right", 0.25, canvas, focus)
+                        cut["presenterPipPosition"] = pos
+                        cut["layoutPx"] = {"pip": nlayout.to_px(nlayout.pip_rect(pos, 0.25, canvas), canvas),
+                                           "caption_safe": nlayout.to_px(nlayout.caption_safe(canvas), canvas)}
+                        if covers:
+                            cut["layoutWarning"] = "presenter PIP covers the focus_region at every corner"
 
                 # Map visual types to Remotion Explainer props
                 if v_type == "presenter_fullscreen":
@@ -221,6 +262,35 @@ class ScenePlanAdapter:
                     meaningful_visual_duration_s += actual_beat_dur
                     if pip_requested and presenter_path:
                         _count_presenter(presenter_path, actual_beat_dur)
+
+                elif v_type in ("sandbox_capture", "sourced_clip"):
+                    want = "sandbox_capture" if v_type == "sandbox_capture" else "sourced_clip"
+                    req_ids = [r if isinstance(r, str) else (r.get("id") or r.get("type")) for r in reqs]
+                    asset = next((asset_by_id[r] for r in req_ids if r in asset_by_id), None) or next(
+                        (a for a in assets if (a.get("asset_type") or a.get("type")) == want), None)
+                    if asset is None:
+                        raise ValueError(f"beat '{beat_id}' ({v_type}) has no {want} asset in the asset_manifest")
+                    cut["type"] = "video"
+                    vp = asset["path"]
+                    if self.project_dir and not Path(vp).is_absolute():
+                        vp = str((self.project_dir / vp).resolve())
+                    cut["source"] = vp
+                    meaningful_visual_duration_s += actual_beat_dur
+                    if pip_requested and presenter_path:
+                        _count_presenter(presenter_path, actual_beat_dur)
+
+                elif v_type == "sourced_image":
+                    req_ids = [r if isinstance(r, str) else (r.get("id") or r.get("type")) for r in reqs]
+                    asset = next((asset_by_id[r] for r in req_ids if r in asset_by_id), None) or next(
+                        (a for a in assets if (a.get("asset_type") or a.get("type")) == "sourced_image"), None)
+                    if asset is None:
+                        raise ValueError(f"beat '{beat_id}' (sourced_image) has no sourced_image asset in the asset_manifest")
+                    ip = asset["path"]
+                    if self.project_dir and not Path(ip).is_absolute():
+                        ip = str((self.project_dir / ip).resolve())
+                    cut["source"] = ip
+                    cut["animation"] = beat.get("animation", {}).get("kind", "ken-burns")
+                    meaningful_visual_duration_s += actual_beat_dur
 
                 elif v_type == "screen_recording":
                     cut["type"] = "video"
@@ -305,6 +375,9 @@ class ScenePlanAdapter:
             "average_beat_duration_seconds": round(total_runtime_s / max(1, len(cuts)), 2),
         }
 
+        legibility_problems = validate_diagram_cuts(cuts, canvas)
+        visual_analytics["legibility_problems"] = legibility_problems
+
         edit_decisions = {
             "version": "1.0",
             "render_runtime": "remotion",
@@ -317,10 +390,15 @@ class ScenePlanAdapter:
             "metadata": {
                 "analytics": visual_analytics,
                 "visual_analytics": visual_analytics,
+                "canvas": canvas,
+                "aspect": nlayout.aspect_of(canvas),
+                "loudness_target_lufs": -14.0,
+                "true_peak_limit_dbtp": -1.0,
             },
         }
 
         return {
+            "canvas": canvas,
             "cuts": cuts,
             "captions": all_captions,
             "edit_decisions": edit_decisions,
