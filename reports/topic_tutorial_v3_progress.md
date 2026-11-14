@@ -45,4 +45,4 @@ Done:
 
 Acceptance:
 - Fast tests (repo, PDF, URL mocked, topic-only, combined; unsupported keys; removed formats; rights fields) → `tests/contracts/test_topic_tutorial.py`: 49 passed.
-- `.venv/bin/pytest tests/contracts -q` → see commit run (all green).
+- `.venv/bin/pytest tests/contracts -q` → 1593 passed, 9 skipped.
