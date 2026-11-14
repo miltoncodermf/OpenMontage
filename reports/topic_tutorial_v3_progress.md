@@ -46,3 +46,24 @@ Done:
 Acceptance:
 - Fast tests (repo, PDF, URL mocked, topic-only, combined; unsupported keys; removed formats; rights fields) → `tests/contracts/test_topic_tutorial.py`: 49 passed.
 - `.venv/bin/pytest tests/contracts -q` → 1593 passed, 9 skipped.
+
+## Phase 3 — Capture sandbox
+
+Owner step: Apple `container` 1.7.1 was already installed and verified (`/usr/local/bin/container`, `container system status` → running); no install 🛑 was needed.
+
+Done:
+- `sandbox/Dockerfile` (Ubuntu 24.04 arm64; Xvfb 1920×1080, openbox, Chromium via Playwright 1.49.1, code-server 4.96.4 pinned, ttyd, ffmpeg, python3, node; non-root `capture` user; no secrets baked in), `sandbox/entrypoint.sh` (iptables owner-match policy applied before anything runs as `capture`), `sandbox/egress_proxy.py` (allow-list HTTP/CONNECT proxy; refuses non-public IPs; logs every decision), `sandbox/runner.py` (drives Chromium in app mode over code-server / ttyd / pages; ffmpeg x11grab 1080p30 H.264 CRF 18; pauses recording during owner login so credentials are never filmed), `sandbox/README.md` (honest residual risks), `sandbox/manual_check.py`.
+- `lib/sandbox/runtime.py` — `ContainerRuntime` with `AppleContainer`, `Colima`, `Docker`; detection order Apple → Colima → Docker.
+- `lib/sandbox/capture_script.py` + `schemas/artifacts/capture_script.schema.json` — unknown actions fail; per-surface action rules; `navigate` host must be in `allow_domains`; IP-literal domains rejected.
+- `lib/sandbox/workspace.py` — host-side copy excluding `.git`, secret filenames (`.env*`, keys, credentials, `.npmrc`…), symlinks, `node_modules`; redacts secret-looking text.
+- `lib/heavy_lock.py` — host-wide lock so captures never overlap lip-sync/Remotion.
+- `tools/capture/sandbox_capture.py` (`capability="screen_capture"`): operations `run`, `build_image`, `start`/`status`/`confirm_login`/`collect` (owner login via noVNC on 127.0.0.1:6080; owner confirms in chat), mounts only a workspace COPY + scratch dir, `--cpus 4 --memory 4G`, wall-clock timeout, container removed after each capture, scratch/workspace copy deleted; manifest `assets.tools_available` now lists it.
+- Not covered by a run: the owner-login (noVNC) flow and Colima/Docker runtimes were not exercised. Residual risk: see `sandbox/README.md`.
+
+Acceptance:
+- Fast tests: capture-script validator, workspace prep exclusions, runtime adapter selection (mocked), heavy-lock, tool input rejection → `tests/contracts/test_topic_tutorial.py`; `.venv/bin/pytest tests/contracts -q` → 1609 passed, 9 skipped.
+- Manual checks (real containers, final image, `sandbox/manual_check.py`):
+  1. code-server capture of `python3 -c "print('hello')"`: success, 10.6 s, 1920×1080, 30 fps, h264; terminal output `hello` visible; clean full-frame (no browser chrome, neutral prompt).
+  2. Browser capture of `https://example.com/` with `allow_domains: [example.com]`: success, 6.1 s, 1920×1080 @ 30 fps; proxy log: allowed `example.com`; Chromium background traffic to `accounts.google.com`, `www.google.com` denied.
+  3. Network probe from the in-sandbox terminal (`allow_domains: [example.com]`): `https://example.com/` → `ALLOWED:200`; `https://example.org/` via proxy → `CONNECT tunnel failed, response 403`; `curl --noproxy '*' https://example.org/` → `Could not resolve host` (iptables owner-match blocks direct/DNS egress). `network.iptables == true` in the guest kernel.
+  4. After runs: no capture containers left (`container ls -a` shows only the builder, since stopped); `.sandbox/` scratch deleted.

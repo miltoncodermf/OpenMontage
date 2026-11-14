@@ -35,6 +35,7 @@ ARTIFACT_NAMES = [
     "inputs",
     "input_manifest",
     "fact_sheet",
+    "capture_script",
 ]
 
 

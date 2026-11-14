@@ -1110,3 +1110,195 @@ class TestV3InputsAndResearch:
         entries = build_attributions(manifest)
         assert [e["asset_id"] for e in entries] == ["i1", "c1"]
         assert "Screen capture of https://site.test" in format_attributions(entries)
+
+
+# ---------------------------------------------------------------------------
+# v3 fast checks (P3): capture script, workspace prep, runtime adapter, guards
+# ---------------------------------------------------------------------------
+
+
+def _script(**kw):
+    base = {
+        "capture_id": "c1_run_tests", "surface": "code_server", "allow_domains": ["pypi.org"],
+        "steps": [
+            {"action": "open_file", "path": "src/app.py", "line": 42},
+            {"action": "type_in_terminal", "text": "python -m pytest -q", "wpm": 220},
+            {"action": "wait_for_text", "text": "passed", "timeout_s": 60},
+            {"action": "screenshot", "label": "tests_passed"},
+            {"action": "pause", "seconds": 1.5},
+        ],
+    }
+    base.update(kw)
+    return base
+
+
+class TestV3CaptureScriptValidator:
+    def test_valid_script_passes_and_spec_example_shape(self):
+        from lib.sandbox.capture_script import validate_capture_script
+
+        assert validate_capture_script(_script()) == []
+
+    def test_unknown_action_fails(self):
+        from lib.sandbox.capture_script import validate_capture_script
+
+        bad = _script(steps=[{"action": "run_shell", "cmd": "rm -rf /"}])
+        assert validate_capture_script(bad)
+
+    def test_extra_fields_and_bad_values_fail(self):
+        from lib.sandbox.capture_script import validate_capture_script
+
+        assert validate_capture_script(_script(steps=[{"action": "pause", "seconds": 1, "x": 1}]))
+        assert validate_capture_script(_script(steps=[{"action": "type_in_terminal", "text": "x", "wpm": 5000}]))
+        assert validate_capture_script(_script(allow_domains=["https://pypi.org"]))
+        assert validate_capture_script(_script(capture_id="Bad ID"))
+        assert validate_capture_script(_script(steps=[]))
+
+    def test_surface_action_compat_and_navigate_allowlist(self):
+        from lib.sandbox.capture_script import validate_capture_script
+
+        term = _script(surface="terminal", steps=[{"action": "open_file", "path": "a.py"}])
+        assert any("not supported on surface" in p for p in validate_capture_script(term))
+        nav = _script(surface="browser", steps=[{"action": "navigate", "url": "https://evil.example/x"}])
+        assert any("not in allow_domains" in p for p in validate_capture_script(nav))
+        ok = _script(surface="browser", allow_domains=["example.com"], steps=[{"action": "navigate", "url": "https://docs.example.com/a"}])
+        assert validate_capture_script(ok) == []
+
+    def test_ip_literal_domain_rejected_and_login_detection(self):
+        from lib.sandbox.capture_script import needs_owner_login, validate_capture_script
+
+        assert validate_capture_script(_script(allow_domains=["10.0.0.5"]))
+        login = _script(surface="browser", steps=[{"action": "await_owner_login"}])
+        assert needs_owner_login(login) and not needs_owner_login(_script())
+
+
+class TestV3SandboxWorkspacePrep:
+    def test_excludes_secrets_git_symlinks_and_redacts(self, tmp_path):
+        from lib.sandbox.workspace import prepare_workspace
+
+        src = tmp_path / "repo"
+        (src / ".git").mkdir(parents=True)
+        (src / ".git" / "config").write_text("[remote]\nurl=https://token@github.com/x/y\n")
+        (src / "src").mkdir()
+        (src / "src" / "app.py").write_text("API_KEY = 'AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz0123456'\nprint('hi')\n")
+        (src / "src" / "ok.py").write_text("print('ok')\n")
+        (src / ".env").write_text("SECRET=abcdefgh12345678\n")
+        (src / ".env.local").write_text("X=1\n")
+        (src / "deploy.pem").write_text("-----BEGIN KEY-----")
+        (src / "my_credentials.json").write_text("{}")
+        (src / ".npmrc").write_text("//registry:_authToken=abc")
+        (src / "node_modules").mkdir()
+        (src / "node_modules" / "m.js").write_text("x")
+        outside = tmp_path / "outside.txt"
+        outside.write_text("outside")
+        (src / "link.txt").symlink_to(outside)
+
+        dest = tmp_path / "sandbox_ws"
+        report = prepare_workspace(src, dest)
+        copied = {p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()}
+        assert copied == {"src/app.py", "src/ok.py"}
+        for name in (".env", ".env.local", "deploy.pem", "my_credentials.json", ".npmrc", "link.txt"):
+            assert name in report["excluded"], name
+        assert ".git/" in report["excluded"] and "node_modules/" in report["excluded"]
+        assert "AIzaSy" not in (dest / "src" / "app.py").read_text()
+        assert "src/app.py" in report["redacted"]
+
+    def test_focus_and_dest_inside_source(self, tmp_path):
+        from lib.sandbox.workspace import prepare_workspace
+
+        src = tmp_path / "repo"
+        (src / "a").mkdir(parents=True)
+        (src / "b").mkdir()
+        (src / "a" / "x.py").write_text("1")
+        (src / "b" / "y.py").write_text("2")
+        dest = src / "projects" / "p" / ".sandbox" / "c" / "workspace"
+        (src / "projects" / "p").mkdir(parents=True)
+        prepare_workspace(src, dest, focus=["a"])
+        assert {p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()} == {"a/x.py"}
+        prepare_workspace(src, dest)  # no focus: must not recurse into its own destination
+        files = {p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()}
+        assert files == {"a/x.py", "b/y.py"}
+
+
+class TestV3SandboxRuntimeAdapter:
+    @staticmethod
+    def _runner(ready):
+        import subprocess
+
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 0 if tuple(argv[:2]) in ready or argv[0] in ready else 1, "", "")
+        return run
+
+    def test_detect_prefers_apple_container_then_colima_then_docker(self):
+        from lib.sandbox.runtime import detect_runtime
+
+        which_all = lambda b: f"/usr/bin/{b}"
+        rt = detect_runtime(which=which_all, runner=self._runner({("container", "system"), "docker", "colima"}))
+        assert rt.name == "apple_container"
+        rt = detect_runtime(which=which_all, runner=self._runner({"colima", "docker"}))
+        assert rt.name == "colima"
+        rt = detect_runtime(which=which_all, runner=self._runner({"docker"}))
+        assert rt.name == "docker"
+        assert detect_runtime(which=lambda b: None, runner=self._runner(set())) is None
+        assert detect_runtime(preferred="docker", which=which_all, runner=self._runner({("container", "system"), "docker"})).name == "docker"
+
+    def test_run_argv_never_mounts_home_and_applies_limits(self):
+        from lib.sandbox.runtime import AppleContainer, Docker, Mount, RunSpec
+
+        spec = RunSpec(image="img", name="n", cpus=4, memory="4G", cap_add=["CAP_NET_ADMIN"],
+                       mounts=[Mount("/proj/.sandbox/c/workspace", "/workspace"), Mount("/proj/.sandbox/c/out", "/out")],
+                       env={"ALLOW_DOMAINS": "pypi.org"})
+        for cls in (AppleContainer, Docker):
+            argv = " ".join(cls().run_argv(spec))
+            assert "--cpus 4" in argv and "--rm" in argv
+            assert "/Users" not in argv.replace("/proj", "") and ".ssh" not in argv
+            assert "ALLOW_DOMAINS=pypi.org" in argv
+        assert "--cap-add CAP_NET_ADMIN" in " ".join(AppleContainer().run_argv(spec))
+        assert "--cap-add NET_ADMIN" in " ".join(Docker().run_argv(spec))
+
+
+class TestV3SandboxToolAndLock:
+    def test_tool_registered_and_rejects_bad_input_without_runtime_side_effects(self, tmp_path, monkeypatch):
+        from tools.capture.sandbox_capture import SandboxCapture
+        from lib.sandbox import runtime as rtmod
+
+        registry.discover()
+        assert registry.get("sandbox_capture") is not None
+
+        class FakeRuntime(rtmod.AppleContainer):
+            def is_ready(self):
+                return True
+
+            def image_exists(self, tag=rtmod.IMAGE_TAG):
+                return True
+
+        tool = SandboxCapture()
+        monkeypatch.setattr(tool, "_runtime", lambda preferred=None: FakeRuntime())
+        bad = tool.execute({"project_dir": str(tmp_path), "script": {"capture_id": "x", "surface": "browser", "steps": [{"action": "hack"}]}})
+        assert bad.success is False and "invalid capture script" in bad.error
+        login = tool.execute({"project_dir": str(tmp_path), "script": _script(surface="browser", steps=[{"action": "await_owner_login"}])})
+        assert login.success is False and "start" in login.error
+        assert not (tmp_path / ".sandbox").exists()
+
+    def test_no_runtime_gives_install_instructions(self, monkeypatch):
+        from tools.capture.sandbox_capture import SandboxCapture
+
+        tool = SandboxCapture()
+        monkeypatch.setattr(tool, "_runtime", lambda preferred=None: None)
+        res = tool.execute({"script": _script()})
+        assert res.success is False and "container" in res.error.lower()
+
+    def test_heavy_job_lock_blocks_overlap_and_reclaims_stale(self, tmp_path):
+        import os
+        from lib.heavy_lock import HeavyJobBusy, current_holder, heavy_job
+
+        lock = tmp_path / "heavy.lock"
+        with heavy_job("a", lock):
+            assert current_holder(lock)["label"] == "a"
+            # same pid re-entry is tolerated; a different live pid is not
+            lock.write_text(json.dumps({"pid": os.getppid(), "label": "other", "since": 0}))
+            with pytest.raises(HeavyJobBusy):
+                with heavy_job("b", lock):
+                    pass
+        lock.write_text(json.dumps({"pid": 999999, "label": "dead", "since": 0}))
+        with heavy_job("c", lock):
+            assert current_holder(lock)["label"] == "c"

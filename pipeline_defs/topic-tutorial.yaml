@@ -162,6 +162,7 @@ stages:
       - alignment_provider
       - code_snippet
       - direct_clip_search
+      - sandbox_capture
       - threejs_world
     checkpoint_required: false
     human_approval_default: true
