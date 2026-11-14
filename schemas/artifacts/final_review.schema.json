@@ -145,6 +145,16 @@
             "issues": { "type": "array", "items": { "type": "string" } }
           }
         },
+        "diagram_legibility": {
+          "type": "object",
+          "description": "topic-tutorial: diagram cuts re-validated at the rendered canvas size (labels >= 28px @1080p, contrast, <= 7 nodes).",
+          "properties": {
+            "canvas": { "type": "object" },
+            "diagrams_checked": { "type": "integer" },
+            "legible": { "type": "boolean" },
+            "issues": { "type": "array", "items": { "type": "string" } }
+          }
+        },
         "honesty_guard": {
           "type": "object",
           "description": "topic-tutorial honesty guard: fixtures/test-only assets must never count as real output.",

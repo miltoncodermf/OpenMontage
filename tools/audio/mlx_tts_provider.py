@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import time
+from lib.heavy_lock import heavy_if
 from pathlib import Path
 from typing import Any, Optional
 
@@ -148,6 +149,12 @@ class MlxTTSProvider(BaseTool):
             pass
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
+        text = str(inputs.get("text", "")).strip()
+        # Batches longer than ~30 s of speech (~450 chars) take the host-wide heavy lock (spec §5.7/§9).
+        with heavy_if(len(text) > 450, "mlx_tts:batch"):
+            return self._execute(inputs)
+
+    def _execute(self, inputs: dict[str, Any]) -> ToolResult:
         started = time.time()
         text = str(inputs.get("text", "")).strip()
         if not text:

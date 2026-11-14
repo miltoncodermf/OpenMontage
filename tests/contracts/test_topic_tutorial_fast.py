@@ -804,34 +804,17 @@ class TestAssetResolverContract:
         assert honesty_check({"assets": [{"path": "assets/video/TEST_ONLY_x.mp4"}]})["blocking"] is False
 
 
-class TestGeminiOmniVideoCostGuardContract:
-    """Verifies Gemini Omni video cost ceiling and opt-in failsafe."""
+class TestStockGeminiOmniUntouched:
+    """The paid-call opt-in/budget gate lives in our own tools (twin_idle_loop + paid_call_guard); the
+    stock gemini_omni_video tool keeps its upstream contract (tests/tools/test_gemini_omni_video.py)."""
 
-    def test_disabled_by_default_fails_closed(self, monkeypatch):
-        from tools.video.gemini_omni_video import GeminiOmniVideo
+    def test_stock_tool_has_no_topic_tutorial_env_gates(self):
+        import inspect
+        import tools.video.gemini_omni_video as mod
 
-        monkeypatch.delenv("GEMINI_VIDEO_ENABLED", raising=False)
-        tool = GeminiOmniVideo()
-        res = tool.execute({"prompt": "A presenter explaining AI"})
-        assert res.success is False
-        assert "disabled by default" in res.error
-        assert res.cost_usd == 0.0
-
-    def test_budget_guard_capped_at_app_budget(self, monkeypatch):
-        from tools.video.gemini_omni_video import GeminiOmniVideo
-
-        monkeypatch.setenv("GEMINI_VIDEO_ENABLED", "true")
-        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-        tool = GeminiOmniVideo()
-        # Default estimated cost is ~$1.52, which is capped within the $8.00 app budget
-        est = tool.estimate_cost({"duration_seconds": 10})
-        assert est < 8.00
-
-        # When caller provides budget_ceiling_usd lower than estimate, execution fails closed
-        res = tool.execute({"prompt": "A presenter explaining AI", "budget_ceiling_usd": 1.00})
-        assert res.success is False
-        assert "exceeds configured budget ceiling" in res.error
-        assert res.cost_usd == 0.0
+        src = inspect.getsource(mod)
+        assert "GEMINI_VIDEO_ENABLED" not in src and "budget_ceiling_usd" not in src
+        assert mod._DEFAULT_MODEL == "gemini-omni-1.1-flash"
 
 
 class TestVideoComposeQAGovernanceContract:
@@ -1287,21 +1270,53 @@ class TestV3SandboxToolAndLock:
         res = tool.execute({"script": _script()})
         assert res.success is False and "container" in res.error.lower()
 
-    def test_heavy_job_lock_blocks_overlap_and_reclaims_stale(self, tmp_path):
-        import os
-        from lib.heavy_lock import HeavyJobBusy, current_holder, heavy_job
+    def test_heavy_job_lock_reentrant_and_dead_holder_frees_it(self, tmp_path):
+        from lib.heavy_lock import current_holder, heavy_job
 
         lock = tmp_path / "heavy.lock"
-        with heavy_job("a", lock):
-            assert current_holder(lock)["label"] == "a"
-            # same pid re-entry is tolerated; a different live pid is not
-            lock.write_text(json.dumps({"pid": os.getppid(), "label": "other", "since": 0}))
-            with pytest.raises(HeavyJobBusy):
-                with heavy_job("b", lock):
-                    pass
-        lock.write_text(json.dumps({"pid": 999999, "label": "dead", "since": 0}))
-        with heavy_job("c", lock):
-            assert current_holder(lock)["label"] == "c"
+        with heavy_job("outer", lock):
+            assert current_holder(lock)["label"] == "outer"
+            with heavy_job("inner", lock):  # nested in one process: no deadlock
+                pass
+            assert current_holder(lock)["label"] == "outer"  # inner exit did not release the outer lock
+        assert current_holder(lock) is None
+
+    def test_heavy_job_two_processes_serialize_and_fail_fast(self, tmp_path):
+        import subprocess
+        import sys
+        import textwrap
+        import time
+
+        from lib.heavy_lock import HeavyJobBusy, heavy_job
+
+        lock = tmp_path / "heavy.lock"
+        log = tmp_path / "log.txt"
+        worker = textwrap.dedent(f"""
+            import sys, time
+            from pathlib import Path
+            from lib.heavy_lock import heavy_job
+            name = sys.argv[1]
+            with heavy_job(name, Path({str(lock)!r}), wait=30):
+                with open({str(log)!r}, "a") as f: f.write(name + ":start\\n")
+                time.sleep(0.6)
+                with open({str(log)!r}, "a") as f: f.write(name + ":end\\n")
+        """)
+        procs = [subprocess.Popen([sys.executable, "-c", worker, n], cwd=str(Path(__file__).resolve().parents[2])) for n in ("a", "b")]
+        # while a worker holds it, a fail-fast acquisition is refused
+        deadline = time.time() + 10
+        refused = False
+        while time.time() < deadline and not refused:
+            try:
+                with heavy_job("probe", lock):
+                    time.sleep(0.02)
+            except HeavyJobBusy:
+                refused = True
+        for p in procs:
+            assert p.wait(timeout=30) == 0
+        lines = log.read_text().split()
+        assert refused
+        assert len(lines) == 4 and lines[0].split(":")[0] == lines[1].split(":")[0]  # start/end of one worker never interleave
+        assert lines[0].endswith("start") and lines[1].endswith("end") and lines[2].endswith("start") and lines[3].endswith("end")
 
 
 # ---------------------------------------------------------------------------
@@ -1708,6 +1723,11 @@ class TestV3TwinIdleLoop:
         monkeypatch.setattr(t, "estimate_cost", lambda inputs: 1.5)
         base = {"operation": "generate", "profile_id": "owner", "variant_id": "v1"}
         assert "not approved" in t.execute(base).error
+        monkeypatch.delenv("ALLOW_PAID_APIS", raising=False)
+        assert "ALLOW_PAID_APIS" in t.execute({**base, "paid_call_approved": True}).error
+        monkeypatch.setenv("ALLOW_PAID_APIS", "true")
+        capped = t.execute({**base, "paid_call_approved": True, "budget_cap_usd": 1.0})
+        assert capped.success is False and "budget cap" in capped.error
         packet = {"approval": {"status": "approved"}, "cost_estimate": {"total_est_usd": 1.5, "paid_calls": []}}
         res = t.execute({**base, "paid_call_approved": True, "proposal_packet": packet})
         assert res.success is False and "paid-call guard" in res.error
@@ -2078,10 +2098,10 @@ class TestV3DiagramLegibility:
 
 
 class TestV3LoudnessAndFinalReview:
-    def _video(self, path, db, seconds=5):
+    def _video(self, path, db, seconds=5, size="320x180"):
         import subprocess
 
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc=size=320x180:rate=30:duration={seconds}",
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc=size={size}:rate=30:duration={seconds}",
                         "-f", "lavfi", "-i", f"sine=frequency=300:duration={seconds}", "-af", f"volume={db}dB",
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", str(path)], check=True)
         return path
@@ -2094,6 +2114,35 @@ class TestV3LoudnessAndFinalReview:
         assert not loudness.within_target(before)
         res = loudness.master_two_pass(src, tmp_path / "mastered.mp4")
         assert res["within_target"] and abs(res["after"]["integrated_lufs"] - -14.0) <= 1.0 and res["after"]["true_peak_dbtp"] <= -1.0
+
+    def test_final_review_diagram_legibility(self, tmp_path, monkeypatch):
+        from lib import loudness
+        from tools.video.video_compose import VideoCompose
+
+        monkeypatch.delenv("OPENMONTAGE_TEST_MODE", raising=False)
+        mastered = Path(loudness.master_two_pass(self._video(tmp_path / "q.mp4", -30, seconds=3, size="1920x1080"), tmp_path / "m.mp4")["output"])
+        ok_spec = {"title": "Pipeline", "nodes": ["Ingest", "Plan", "Render"], "edges": [["Ingest", "Plan"], ["Plan", "Render"]]}
+        small = {**ok_spec, "label_font_px": 20}
+        vc = VideoCompose()
+
+        def ed(spec):
+            return {"cuts": [], "metadata": {"loudness_target_lufs": -14.0, "canvas": {"width": 1920, "height": 1080},
+                                             "diagram_cuts": [{"id": "d1", "type": "diagram", "diagramSpec": spec, "color": "#F8FAFC"}]}}
+
+        bad = vc._run_final_review(mastered, ed(small))
+        assert bad["checks"]["diagram_legibility"]["legible"] is False and bad["status"] == "revise"
+        assert any("d1" in i and "label font 20px" in i for i in bad["issues_found"])
+        good = vc._run_final_review(mastered, ed(ok_spec))
+        assert good["checks"]["diagram_legibility"]["legible"] is True and good["status"] == "pass"
+
+    def test_adapter_publishes_diagram_cuts_for_compose_qa(self):
+        from lib.presenter_fallback import replan_without_presenter
+        from tools.video.scene_plan_adapter import ScenePlanAdapter
+
+        plan = replan_without_presenter(TestV3NoPresenterFallback()._plan(), "failed")
+        compiled = ScenePlanAdapter().compile(plan, {"assets": []}, [], {"s1": 5.0, "s2": 7.0})
+        dc = compiled["edit_decisions"]["metadata"]["diagram_cuts"]
+        assert dc and all(c["diagramSpec"] for c in dc)
 
     def test_final_review_loudness_and_honesty_guard(self, tmp_path, monkeypatch):
         from lib import loudness
@@ -2126,3 +2175,31 @@ class TestV3LoudnessAndFinalReview:
         v = self._video(tmp_path / "v.mp4", -14)
         rev = VideoCompose()._run_final_review(v, {"metadata": {"loudness_target_lufs": -14.0}, "cuts": []})
         validate_artifact("final_review", rev)
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 — Group A
+# ---------------------------------------------------------------------------
+
+
+class TestFixRound1GroupA:
+    def test_every_playbook_has_a_verification_entry(self):
+        from lib import playbook_verification as pv
+
+        entries = pv.load_verification()
+        assert set(pv.playbook_ids()) == set(entries) and all("verified" in v for v in entries.values())
+        assert pv.label("software-technical").endswith("(verified: false)") or pv.is_verified("software-technical")
+
+    def test_playbook_loader_does_not_list_the_sidecar(self):
+        from styles.playbook_loader import list_playbooks
+
+        assert "playbook_verification" not in list_playbooks() and "verification" not in list_playbooks()
+
+    def test_gemini_image_estimate_itemizes_beautify_calls(self):
+        from lib import gemini_image_pricing as gp
+        from tools.presenters.twin_identity import TwinIdentity
+
+        est = TwinIdentity().estimate_cost({"operation": "beautify", "profile_id": "x", "count": 6})
+        assert est > 0 and est == gp.estimate_calls_usd("gemini-3.1-flash-image", 6)
+        assert gp.SOURCE_URL.startswith("https://") and gp.AS_OF
+        assert TwinIdentity().estimate_cost({"operation": "extract_stills", "profile_id": "x"}) == 0.0

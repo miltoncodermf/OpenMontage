@@ -1,0 +1,11 @@
+# Optional LOCAL dependencies for the topic-tutorial pipeline (install in addition to requirements.txt).
+#   python -m pip install -r requirements-topic-tutorial.txt
+# Everything here runs offline on Apple Silicon; nothing here is a paid or cloud service.
+
+# Script-anchored caption alignment (lib/script_alignment.py): faster-whisper word times are anchored
+# onto the known script tokens -> alignment_method = "asr_anchored" (the documented default; the
+# spec's whisperX "forced" alignment is not part of this repo, see docs/topic-tutorial-v3-fixes.md §5).
+faster-whisper>=1.2
+# NOTE: tools/analysis/transcriber.py pre-decodes audio with ffmpeg (Transcriber._audio_input) instead of
+# letting faster-whisper's bundled PyAV read the file: some PyAV builds raise a `metadata_errors`
+# AttributeError on demuxed streams. Keep ffmpeg on PATH.

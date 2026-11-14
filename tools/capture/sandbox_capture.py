@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from lib.heavy_lock import HeavyJobBusy, heavy_job
+from lib.heavy_lock import DEFAULT_RENDER_WAIT_S, HeavyJobBusy, heavy_job
 from lib.sandbox.capture_script import needs_owner_login, validate_capture_script
 from lib.sandbox.runtime import IMAGE_TAG, ContainerRuntime, Mount, RunSpec, detect_runtime
 from lib.sandbox.workspace import prepare_workspace
@@ -260,7 +260,7 @@ class SandboxCapture(BaseTool):
                 "next": "status → confirm_login (after the owner has logged in himself) → collect",
             })
 
-        with heavy_job(f"sandbox_capture:{cid}"):
+        with heavy_job(f"sandbox_capture:{cid}", wait=DEFAULT_RENDER_WAIT_S):
             try:
                 subprocess.run(rt.run_argv(spec), capture_output=True, text=True, timeout=max_s + BOOT_GRACE_S)
             except subprocess.TimeoutExpired:

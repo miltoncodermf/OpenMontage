@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from lib import twin_backends, twin_media
-from lib.heavy_lock import HeavyJobBusy, heavy_job
+from lib.heavy_lock import DEFAULT_RENDER_WAIT_S, HeavyJobBusy, heavy_job
 from tools.base_tool import (
     BaseTool,
     Determinism,
@@ -137,7 +137,7 @@ class TwinLipsync(BaseTool):
         motion_hash = _sha(motion)
         results, skipped = [], []
         try:
-            with heavy_job("twin_lipsync"):
+            with heavy_job("twin_lipsync", wait=DEFAULT_RENDER_WAIT_S):
                 for seg in inputs["segments"]:
                     sid, audio = seg["segment_id"], Path(seg["audio"])
                     out = out_dir / f"{sid}.mp4"

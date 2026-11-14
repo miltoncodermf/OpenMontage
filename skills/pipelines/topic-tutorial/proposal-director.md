@@ -11,7 +11,7 @@ Present **2–3 differentiated concepts** and, in one reviewable packet (`propos
 3. **Itemized paid-call table** — `cost_estimate.paid_calls[]`: `{tool, provider, model, purpose, units, unit_cost, est_usd}` plus `total_est_usd` (default $0.00). Typical entries: Gemini image calls (wardrobe variants), `gemini_omni_video` idle loop (hybrid engine only), optional Gemini Deep Research. Approval covers these up to **estimate + 20 %**; anything else pauses and asks (`lib/paid_call_guard.py`).
 4. **Presenter plan** — engine (`hybrid` vs `local`, from the owner's bake-off default — log `presenter_engine`), outfit choice (existing catalog variant or new simple one — log `presenter_wardrobe`), screen-time estimate (content-driven: full-screen for hook, section intros, outro; PIP on the low side, ~30 % of the remaining runtime), and the no-presenter fallback statement (D2).
 5. **Capture plan summary** — which beats need sandbox captures, target surfaces, domains to allow, whether any login is needed (owner logs in himself — D15). Log `capture_plan`.
-6. **Playbook** — choice plus its `verified` flag (only `software-technical` is verified in v3; others are selectable but labeled `verified: false`). Log `playbook`.
+6. **Playbook** — choice plus its `verified` flag, read from `lib/playbook_verification.py` (`config/topic-tutorial/playbook_verification.yaml`; `software-technical` becomes verified only after the owner approves a real run at the compose gate — until then every playbook is labelled `verified: false`). Log `playbook`.
 7. **Assumptions to state** (not owner-decided): English only; local bundle publish only (no upload); 16:9 first (9:16 re-layout is a later, easy change).
 8. Runtime estimate (4–8 min typical) and target loudness.
 

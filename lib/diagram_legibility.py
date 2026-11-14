@@ -83,6 +83,11 @@ def validate_diagram_spec(spec: dict[str, Any], canvas: dict[str, int], text_col
     floor = canvas["height"] / BASE_HEIGHT
     if fonts["label"] < MIN_LABEL_PX * floor - 0.5 or fonts["title"] < MIN_TITLE_PX * floor - 0.5:
         problems.append("rendered font sizes fall below the 1080p-scaled legibility floor")
+    # Explicit per-diagram font overrides (px at the rendered canvas) must also respect the floor.
+    for key, floor_px, what in (("label_font_px", MIN_LABEL_PX, "label"), ("title_font_px", MIN_TITLE_PX, "title")):
+        px = spec.get(key)
+        if px is not None and float(px) < floor_px * floor - 0.5:
+            problems.append(f"{what} font {px}px is below the {round(floor_px * floor)}px legibility floor at this canvas")
     if _HEX.match(text_color or ""):
         for bg in (CARD_BACKGROUND, CARD_BACKGROUND_LIGHTEST):
             c = contrast_ratio(text_color, bg)

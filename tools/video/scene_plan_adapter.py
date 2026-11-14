@@ -392,6 +392,11 @@ class ScenePlanAdapter:
                 "visual_analytics": visual_analytics,
                 "canvas": canvas,
                 "aspect": nlayout.aspect_of(canvas),
+                # Re-validated against the actual rendered size at compose QA (spec §5.9).
+                "diagram_cuts": [
+                    {"id": c.get("id"), "type": "diagram", "diagramSpec": c["diagramSpec"], "color": c.get("color")}
+                    for c in cuts if c.get("type") == "diagram" and c.get("diagramSpec")
+                ],
                 "loudness_target_lufs": -14.0,
                 "true_peak_limit_dbtp": -1.0,
             },

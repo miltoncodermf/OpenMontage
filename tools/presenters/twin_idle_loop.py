@@ -44,7 +44,7 @@ class TwinIdleLoop(BaseTool):
     runtime = ToolRuntime.API
     dependencies = ["binary:ffmpeg", "env:GEMINI_API_KEY"]
     agent_skills = ["gemini-omni"]
-    install_instructions = "Needs GEMINI_API_KEY with Gemini Omni access, GEMINI_VIDEO_ENABLED=true and ALLOW_PAID_APIS=true for an approved run."
+    install_instructions = "Needs GEMINI_API_KEY with Gemini Omni access and ALLOW_PAID_APIS=true for an approved run (this tool is the topic-tutorial paid-call gate; the stock gemini_omni_video tool is unmodified)."
     fallback_tools = ["google_flow_import"]
     capabilities = ["idle_loop_generation", "loop_seam_check", "flow_import"]
     supports = {"operations": ["plan", "generate", "import_flow", "check_loop", "make_motion_source"]}
@@ -61,6 +61,7 @@ class TwinIdleLoop(BaseTool):
             "paid_call_approved": {"type": "boolean", "default": False},
             "proposal_packet": {"type": "object"},
             "actual_spent_usd": {"type": "number", "default": 0},
+            "budget_cap_usd": {"type": "number", "description": "Owner-approved dev spend cap; blocks the call if spent + estimate exceeds it."},
             "flow_clip": {"type": "string"},
             "duration_s": {"type": "number"},
         },
@@ -130,7 +131,12 @@ class TwinIdleLoop(BaseTool):
     def _generate(self, d: Path, vid: str, loop: Path, inputs: dict[str, Any]) -> ToolResult:
         if not inputs.get("paid_call_approved"):
             return ToolResult(success=False, error="paid Gemini Omni call not approved: announce tool/model/estimate and get the owner's OK first (spec 🛑)")
+        if os.environ.get("ALLOW_PAID_APIS", "").lower() != "true":
+            return ToolResult(success=False, error="ALLOW_PAID_APIS is not 'true' for this run — set it only after the owner approved the paid call")
         est = self.estimate_cost(inputs)
+        cap = inputs.get("budget_cap_usd")
+        if cap is not None and float(inputs.get("actual_spent_usd", 0)) + est > float(cap):
+            return ToolResult(success=False, error=f"dev budget cap ${float(cap):.2f} would be exceeded (spent ${float(inputs.get('actual_spent_usd', 0)):.2f} + est ${est:.2f})")
         packet = inputs.get("proposal_packet")
         if packet is not None:
             verdict = check_paid_call(packet, tool="gemini_omni_video", provider="gemini", model=None, est_usd=est,

@@ -37,14 +37,11 @@ from tools.base_tool import (
 
 _BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 _UPLOAD_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files"
-_DEFAULT_MODEL = os.environ.get("GEMINI_VIDEO_MODEL", "gemini-omni-1.2-flash")
-_SUPPORTED_MODELS = {"gemini-omni-1.2-flash", "gemini-omni-1.1-flash", "gemini-omni-flash-preview"}
-# Default local safety budget ceiling ($8.00 application budget, $10.00 hard limit)
-_DEFAULT_BUDGET_CEILING_USD = float(os.environ.get("GEMINI_VIDEO_PROJECT_BUDGET_USD", "8.00"))
+_DEFAULT_MODEL = "gemini-omni-1.1-flash"
 # Billed at 5,792 output tokens per second of 720p video, $17.50/1M tokens
-# (ai.google.dev/gemini-api/docs/pricing) — effectively ~$0.10 per second for 1.1, ~$0.07/s for 1.2.
+# (ai.google.dev/gemini-api/docs/pricing) — effectively ~$0.10 per second.
 _OUTPUT_VIDEO_TOKENS_PER_SECOND = 5_792
-_MAX_OUTPUT_DURATION_SECONDS = 15
+_MAX_OUTPUT_DURATION_SECONDS = 10
 _MAX_VIDEO_TOKEN_ESTIMATE = _MAX_OUTPUT_DURATION_SECONDS * _OUTPUT_VIDEO_TOKENS_PER_SECOND
 _INPUT_COST_PER_MILLION_TOKENS = 1.50
 _OUTPUT_TEXT_COST_PER_MILLION_TOKENS = 9.00
@@ -225,11 +222,9 @@ class GeminiOmniVideo(BaseTool):
         return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
     def get_status(self) -> ToolStatus:
-        if not self._get_api_key():
-            return ToolStatus.UNAVAILABLE
-        if os.environ.get("GEMINI_VIDEO_ENABLED", "false").lower() not in ("true", "1"):
-            return ToolStatus.DEGRADED
-        return ToolStatus.AVAILABLE
+        if self._get_api_key():
+            return ToolStatus.AVAILABLE
+        return ToolStatus.UNAVAILABLE
 
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
         input_token_upper_bound = len(str(inputs.get("prompt") or "").encode("utf-8"))
@@ -471,19 +466,6 @@ class GeminiOmniVideo(BaseTool):
         return download_resp.content
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
-        # Opt-in check: cloud video generation is disabled by default unless explicitly allowed
-        enabled_env = os.environ.get("GEMINI_VIDEO_ENABLED", "false").lower() in ("true", "1")
-        allowed_input = inputs.get("allow_paid_apis", False) is True or inputs.get("enabled", False) is True
-        if not (enabled_env or allowed_input):
-            return ToolResult(
-                success=False,
-                error=(
-                    "Gemini Omni cloud video generation is disabled by default (GEMINI_VIDEO_ENABLED=false). "
-                    "Opt in by setting GEMINI_VIDEO_ENABLED=true or passing allow_paid_apis=True after confirming budget."
-                ),
-                cost_usd=0.0,
-            )
-
         api_key = self._get_api_key()
         if not api_key:
             return ToolResult(
@@ -491,24 +473,14 @@ class GeminiOmniVideo(BaseTool):
                 error="GEMINI_API_KEY / GOOGLE_API_KEY not set. " + self.install_instructions,
             )
 
-        # Budget ceiling and cost reservation check
-        estimated_cost = self.estimate_cost(inputs)
-        max_budget = float(inputs.get("budget_ceiling_usd", _DEFAULT_BUDGET_CEILING_USD))
-        if estimated_cost > max_budget:
-            return ToolResult(
-                success=False,
-                error=f"Estimated generation cost (${estimated_cost:.2f}) exceeds configured budget ceiling (${max_budget:.2f}).",
-                cost_usd=0.0,
-            )
-
         import requests
 
         start = time.time()
         model = inputs.get("model", _DEFAULT_MODEL)
-        if model not in _SUPPORTED_MODELS and model != _DEFAULT_MODEL:
+        if model != _DEFAULT_MODEL:
             return ToolResult(
                 success=False,
-                error=f"Unsupported Gemini Omni model {model!r}; must be one of {sorted(_SUPPORTED_MODELS)}.",
+                error=f"Unsupported Gemini Omni model {model!r}; use {_DEFAULT_MODEL}.",
             )
         resume_video_uri = inputs.get("resume_video_uri")
         if resume_video_uri:

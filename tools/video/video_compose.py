@@ -38,6 +38,7 @@ import secrets
 import shutil
 import subprocess
 import time
+from lib.heavy_lock import DEFAULT_RENDER_WAIT_S, heavy_job
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
@@ -372,9 +373,11 @@ class VideoCompose(BaseTool):
             if operation == "compose":
                 result = self._compose(inputs)
             elif operation == "render":
-                result = self._render(inputs)
+                with heavy_job("video_compose:render", wait=DEFAULT_RENDER_WAIT_S):  # spec §9: never overlap heavy jobs
+                    result = self._render(inputs)
             elif operation == "remotion_render":
-                result = self._remotion_render(inputs)
+                with heavy_job("video_compose:remotion_render", wait=DEFAULT_RENDER_WAIT_S):
+                    result = self._remotion_render(inputs)
             elif operation == "burn_subtitles":
                 result = self._burn_subtitles(inputs)
             elif operation == "overlay":
@@ -2773,6 +2776,22 @@ class VideoCompose(BaseTool):
                 loudness_check = {"within_target": None, "issues": [f"Loudness measurement not run: {e}"]}
             issues.extend(loudness_check["issues"])
 
+        # --- 6a2. Diagram legibility at the ACTUAL rendered size (topic-tutorial, spec §5.9) ---
+        legibility_check: dict[str, Any] | None = None
+        diagram_cuts = ((edit_decisions or {}).get("metadata") or {}).get("diagram_cuts")
+        if diagram_cuts:
+            from lib.diagram_legibility import validate_cuts
+
+            meta_canvas = ((edit_decisions or {}).get("metadata") or {}).get("canvas") or {}
+            try:
+                width, height = (int(v) for v in str(technical_probe.get("resolution", "")).split("x"))
+            except ValueError:
+                width, height = int(meta_canvas.get("width") or 1920), int(meta_canvas.get("height") or 1080)
+            problems = validate_cuts(diagram_cuts, {"width": width, "height": height})
+            legibility_check = {"canvas": {"width": width, "height": height}, "diagrams_checked": len(diagram_cuts),
+                                "legible": not problems, "issues": [f"Diagram illegible: {p}" for p in problems]}
+            issues.extend(legibility_check["issues"])
+
         # --- 6b. Honesty guard (topic-tutorial): fixtures never count as real ---
         from lib.honesty_guard import honesty_check
 
@@ -2784,6 +2803,7 @@ class VideoCompose(BaseTool):
             i for i in issues
             if any(kw in i.lower() for kw in [
                 "silent downgrade", "delivery promise violation", "loudness out of target",
+                "diagram illegible",
                 "effectively silent", "ffprobe failed", "suspiciously short",
                 "tts punctuation leak",  # reading literal punctuation aloud
             ])
@@ -2820,6 +2840,7 @@ class VideoCompose(BaseTool):
                 "transcript_comparison": transcript_comparison,
                 "honesty_guard": honesty,
                 **({"loudness": loudness_check} if loudness_check is not None else {}),
+                **({"diagram_legibility": legibility_check} if legibility_check is not None else {}),
             },
             "issues_found": issues,
             "recommended_action": recommended_action,

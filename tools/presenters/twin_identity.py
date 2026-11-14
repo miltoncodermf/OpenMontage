@@ -115,8 +115,12 @@ class TwinIdentity(BaseTool):
         return ToolStatus.AVAILABLE if _mediapipe_faces() else ToolStatus.DEGRADED
 
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
-        # Gemini image pricing is token/resolution based; the proposal must carry a current quote.
-        return 0.0
+        # Dated per-image table (lib/gemini_image_pricing.py, source + as_of recorded) — itemize in the proposal.
+        from lib.gemini_image_pricing import estimate_calls_usd
+
+        op = inputs.get("operation")
+        n = int(inputs.get("count", 5)) if op == "beautify" else 1 if op == "wardrobe" else 0
+        return estimate_calls_usd(inputs.get("model", DEFAULT_IMAGE_MODEL), n, inputs.get("resolution", "1K"))
 
     # ------------------------------------------------------------------
     def _imagen(self):

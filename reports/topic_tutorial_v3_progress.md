@@ -146,3 +146,32 @@ Acceptance (actual runs):
 - Smoke: `.venv/bin/pytest -m smoke tests/contracts/test_topic_tutorial_smoke.py -q` → 1 passed in ~56 s.
 - Full contracts: `.venv/bin/pytest tests/contracts -q` → 1670 passed, 10 skipped.
 - Whole repo `tests/` excluding `tests/tools/test_gemini_omni_video.py` (25 failures that exist on `main`, untouched by this branch): 3051 passed, 14 skipped (run before the last small layout change; contracts re-run after).
+
+---
+
+## Fix round 1
+
+Source: `docs/topic-tutorial-v3-fixes.md` (Opus audit). Commits are per group: `fix(topic-tutorial-v3): <group> — <summary>`. Not pushed. §4 (owner recordings) is skipped by design.
+
+### Group A — Hygiene (F6, F7, F8, F9, F12, F13)
+
+**F6 — stock Gemini Omni tool restored.** Our earlier commit `b4d5baf` had changed `tools/video/gemini_omni_video.py` (env-driven default model, `GEMINI_VIDEO_ENABLED` gate, budget ceiling). Restored it to its pre-`b4d5baf` contents with `git checkout b4d5baf^ -- tools/video/gemini_omni_video.py` (default model `gemini-omni-1.1-flash` again; no env gates).
+- Paid-call gate now lives only in our own layer: `tools/presenters/twin_idle_loop.py` requires `paid_call_approved`, `ALLOW_PAID_APIS=true`, an optional `budget_cap_usd` (spent + estimate must stay ≤ cap) and `lib/paid_call_guard`. The stock-tool tests I had added for the removed gates were replaced by `TestStockGeminiOmniUntouched`.
+- `gemini-omni-1.2-flash` is **not** enabled: the pricing page lists it (`$12/1M` video output, ≈ $0.07/s) and says `1.1` requests route to `1.2` from 2026-12-03. If B6 needs `1.2`, extend the stock enum upstream-compatibly then; nothing needs it yet.
+- `.venv/bin/pytest tests/tools/test_gemini_omni_video.py -q` → **33 passed** (was 25 failed / 8 passed).
+
+**F7 — legibility in compose QA.** `VideoCompose._run_final_review` now computes `checks.diagram_legibility` from `edit_decisions.metadata.diagram_cuts` (published by `ScenePlanAdapter`) at the **rendered** resolution (from ffprobe); any violation → issue `Diagram illegible: …` → `status: revise`. `lib/diagram_legibility.validate_diagram_spec` also honours explicit `label_font_px` / `title_font_px` overrides. Schema `final_review` gained `checks.diagram_legibility`. Tests: `test_final_review_diagram_legibility` (20 px label at 1080p → revise; compliant → pass) and `test_adapter_publishes_diagram_cuts_for_compose_qa`.
+
+**F8 — heavy lock everywhere heavy.** `lib/heavy_lock.py` rewritten on `fcntl.flock` (atomic, kernel releases it when the holder dies — no stale-pid logic), re-entrant per process (the old version's inner `finally` released the outer lock), `wait=` queues instead of failing (`wait=0` keeps fail-fast). Taken in: `VideoCompose` `render`/`remotion_render`, `HyperFramesCompose` `render`/`render_existing`, `mlx_tts` for text > 450 chars (~30 s of speech), plus the existing `sandbox_capture` and `twin_lipsync` (now queue up to 1 h). LatentSync/LivePortrait run inside `twin_lipsync`, so they are covered. Tests: nested no-deadlock; two real processes serialize (start/end never interleave) while a fail-fast probe is refused.
+
+**F9 — playbook verification.** The playbook schema allows extra top-level keys, but `styles/playbook_loader.list_playbooks` globs `styles/topic-tutorial/*.yaml` and would list a sidecar as a playbook, so the sidecar is `config/topic-tutorial/playbook_verification.yaml` (deviation from the doc's `styles/topic-tutorial/verification.yaml`; recorded here). All five playbooks `verified: false`; `lib/playbook_verification.py` loader; `proposal-director.md` reads it. Tests: every playbook has an entry; loader doesn't list the sidecar. `software-technical` flips to `true` only after the owner approves Group E's compose gate.
+
+**F12 — dependencies.** New `requirements-topic-tutorial.txt` (the repo has no extras mechanism; it follows the existing `requirements-gpu.txt` / `-dev.txt` pattern) with `faster-whisper>=1.2` and a comment on the ffmpeg pre-decode workaround for the PyAV `metadata_errors` bug; documents `alignment_method = asr_anchored` as the default. Groups B/C add their deps there.
+
+**F13 — Gemini image pricing.** `lib/gemini_image_pricing.py` (our own table; the stock `google_imagen` tool intentionally raises `PriceQuoteRequired` for these models and is untouched). Source `https://aistudio.google.com/docs/pricing` (fetched 2026-11-14): `gemini-3.1-flash-image` 1K $0.067/image, `gemini-nano-banana-2.1` 1K $0.0336, `gemini-3-pro-image` 1K $0.134, etc., plus a $0.01 input/thinking pad per call. `TwinIdentity.estimate_cost` now returns a number (6 beautify calls = $0.462 on the default model).
+
+**Also pulled forward (needed for the tree to stay green):** committing the fixes doc makes `test_skill_reference_paths` demand `docs/presenter-onboarding-recording-guide.md`, so the F14 deliverables `docs/presenter-onboarding-recording-guide.md` and `config/presenter-onboarding/voice_read_script.md` (442 words, original) were written now; the skill-failure-handling part of F14 stays in Group D.
+
+Commands and results:
+- `.venv/bin/pytest tests/contracts/test_topic_tutorial_fast.py -q` → 119 passed
+- `.venv/bin/pytest tests/ -q -p no:cacheprovider` (**no exclusions**) → **3093 passed, 15 skipped** in 120 s (skips: optional playwright, footage/golden fixtures, live-doc checks, smoke opt-in).
