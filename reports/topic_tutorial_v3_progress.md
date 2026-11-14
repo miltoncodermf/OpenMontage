@@ -67,3 +67,26 @@ Acceptance:
   2. Browser capture of `https://example.com/` with `allow_domains: [example.com]`: success, 6.1 s, 1920×1080 @ 30 fps; proxy log: allowed `example.com`; Chromium background traffic to `accounts.google.com`, `www.google.com` denied.
   3. Network probe from the in-sandbox terminal (`allow_domains: [example.com]`): `https://example.com/` → `ALLOWED:200`; `https://example.org/` via proxy → `CONNECT tunnel failed, response 403`; `curl --noproxy '*' https://example.org/` → `Could not resolve host` (iptables owner-match blocks direct/DNS egress). `network.iptables == true` in the guest kernel.
   4. After runs: no capture containers left (`container ls -a` shows only the builder, since stopped); `.sandbox/` scratch deleted.
+
+## Phase 4 — Presenter onboarding (identity + voice) — code complete; owner steps NOT done
+
+Status: **blocked on 🛑 owner touchpoints** (recording session → identity pick → voice pick). No real profile exists yet; nothing here counts as a real presenter or voice.
+
+Done (code, fast-tested):
+- `schemas/artifacts/presenter_profile.schema.json` (locked profile requires identity + voice + hashes); `lib/presenter_profile.py` (`~/.openmontage/presenter_profiles/<id>/`, `OPENMONTAGE_PROFILE_ROOT` override, dirs mode 700 / files 600, create / lock with sha256 of every file / verify incl. permissions and tamper detection / `mint_presenter_asset` / raw-path detection).
+- Guard (D3) `lib/presenter_guard.py` extended: rejects anything not `identity_transform == "beautified"` + `profile_id`, test-only paths, `source_type` owner_raw/user_supplied, and any path inside a profile's `raw/` — even if the asset claims to be beautified. `mint_presenter_asset` refuses raw paths and unlocked profiles.
+- `tools/presenters/presenter_profile.py` tool (`init/status/verify/lock/validate_recording/record_raw/mint_asset/check_asset`); `lib/recording_validation.py` (ffprobe: ≥1080p, fps, duration windows, ≥44.1 kHz, noise floor ≤ −45 dBFS, no clipping).
+- `tools/presenters/twin_identity.py` + `lib/twin_prompts.py`: still extraction (MediaPipe when installed — **not installed here; the tool says so and falls back to sharpness-only**), Gemini-image beautify / wardrobe / pick_canonical via `google_imagen`. Paid calls are refused unless `paid_call_approved: true` AND `ALLOW_PAID_APIS=true`. **No Gemini call has been made.** The tool cannot price Gemini image models (needs a quote) — to be itemized at the 🛑.
+- `lib/voice_lab.py` + `tools/audio/voice_lab.py`: 8-candidate plan (4 Kokoro blends + 4 Chatterbox blends), fixed polish chain, local candidate page (`voice/candidates/index.html`), `lock_voice` → `voice_profile.json`; `mlx_tts` accepts `voice_profile` (seeded Kokoro synthesis + polish; refuses non-Kokoro engines, no silent fallback).
+- `pipeline_defs/presenter-onboarding.yaml` + 6 skills in `skills/pipelines/presenter-onboarding/` (capture_session 🛑, identity_build, identity_lock 🛑, voice_lab, voice_lock 🛑). `test_runtime_presentation_contract.py` excludes it (no compose stage).
+
+Verified with real runs: Kokoro blend synthesis works (4 candidates built in ~6–8 s, polish chain applied); two syntheses of the same text from a locked profile differ by max abs 9e-5 (seeded; **not byte-identical** — spec said "deterministic", corrected to "reproducible to float jitter" in the profile note and skills).
+
+Not verified / not run:
+- **Chatterbox:** `chatterbox` package is not installed; the four Chatterbox candidates are listed as `unavailable` on the page, and the embedding-interpolation API was **not** verified. Per spec the owner must be told before any engine switch; weights would be a ≥ 500 MB download needing OK.
+- Face detection (MediaPipe) not installed; stills extraction exercised only on a synthetic clip.
+- Real beautify / wardrobe (Gemini): not run (🛑 first paid call).
+- Owner recording validation tested on synthetic clips only.
+
+Acceptance (fast): guard rejects a raw recording passed as presenter (tiny generated clip), profile lock/verify/tamper, recording validation, voice recipes/page/profile, paid-call refusal, mocked Gemini flow → `tests/contracts/test_topic_tutorial.py` 77 passed; `tests/contracts` all green.
+Pending 🛑: owner recording session → identity pick → voice pick; first paid Gemini image call.

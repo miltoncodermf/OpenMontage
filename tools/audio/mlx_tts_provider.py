@@ -92,6 +92,11 @@ class MlxTTSProvider(BaseTool):
                 "default": True,
                 "description": "Whether to allow fallback to Piper TTS if Kokoro MLX fails",
             },
+            "voice_profile": {
+                "type": "string",
+                "description": "Path to a locked voice_profile.json (topic-tutorial presenter voice). Synthesis is "
+                               "seeded (reproducible to float32 jitter) and polished with the profile's fixed chain; no Piper fallback is used.",
+            },
         },
     }
 
@@ -148,6 +153,9 @@ class MlxTTSProvider(BaseTool):
         if not text:
             return ToolResult(success=False, error="Text input cannot be empty")
 
+        if inputs.get("voice_profile"):
+            return self._execute_voice_profile(inputs, text, started)
+
         voice = str(inputs.get("voice", "af_heart"))
         speed = float(inputs.get("speed", 1.0))
         allow_fallback = bool(inputs.get("allow_fallback", True))
@@ -198,6 +206,54 @@ class MlxTTSProvider(BaseTool):
                     error=f"Kokoro MLX synthesis failed and allow_fallback=False: {mlx_err}",
                 )
             return self._fallback_piper(inputs, str(output_path), started, f"Kokoro MLX fallback ({mlx_err})")
+
+    def _execute_voice_profile(self, inputs: dict[str, Any], text: str, started: float) -> ToolResult:
+        """Deterministic synthesis from a locked voice_profile.json (spec D9, §5.6)."""
+        import json as _json
+        import tempfile
+
+        from lib import voice_lab
+
+        prof_path = Path(inputs["voice_profile"])
+        if not prof_path.is_file():
+            return ToolResult(success=False, error=f"voice_profile not found: {prof_path}")
+        prof = _json.loads(prof_path.read_text(encoding="utf-8"))
+        engine = prof.get("engine")
+        if engine != "kokoro":
+            return ToolResult(
+                success=False,
+                error=f"voice profile engine {engine!r} is not available in mlx_tts (only 'kokoro' is wired). "
+                      "Chatterbox profiles need the chatterbox backend; ask the owner before switching engines.",
+            )
+        output_path = Path(inputs.get("output_path", "narration.wav")).resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            kokoro = self._get_kokoro()
+            res = voice_lab.kokoro_synthesize(kokoro, text, prof["recipe"], seed=prof.get("seed", 1234))
+            audio = np.asarray(res.audio, dtype=np.float32)
+            if audio.size == 0:
+                raise RuntimeError("empty audio")
+            sr = int(getattr(res, "sample_rate", 24000))
+            with tempfile.TemporaryDirectory() as td:
+                raw = Path(td) / "raw.wav"
+                sf.write(str(raw), audio, sr)
+                voice_lab.polish(raw, output_path)
+        except Exception as exc:  # noqa: BLE001 — no silent fallback to another voice
+            return ToolResult(success=False, error=f"voice-profile synthesis failed: {exc}")
+        info = sf.info(str(output_path))
+        duration_s = round(info.frames / float(info.samplerate), 3)
+        return ToolResult(
+            success=True,
+            data={
+                "provider": "mlx", "model": f"kokoro-mlx/{prof.get('candidate_id', 'profile')}",
+                "sample_rate": int(info.samplerate), "duration_s": duration_s, "word_count": len(text.split()),
+                "timestamps": self._build_word_timestamps(text, duration_s, audio_path=output_path),
+                "output": str(output_path), "format": "wav", "voice_profile": str(prof_path),
+                "voice_profile_sha256": __import__("hashlib").sha256(prof_path.read_bytes()).hexdigest(),
+            },
+            artifacts=[str(output_path)], duration_seconds=round(time.time() - started, 2), cost_usd=0.0,
+            model=prof.get("candidate_id"),
+        )
 
     def _fallback_piper(self, inputs: dict[str, Any], output_path: str, started: float, reason: str) -> ToolResult:
         from tools.audio.piper_tts import PiperTTS

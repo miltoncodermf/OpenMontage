@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/presenter_profile",
+  "title": "Presenter profile",
+  "description": "profile.json of a private presenter profile (~/.openmontage/presenter_profiles/<profile_id>/). Never stored in git or under projects/. A locked profile carries sha256 hashes of every file (spec D4, §5.5).",
+  "type": "object",
+  "required": ["version", "profile_id", "locked", "files"],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "profile_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+    "display_name": { "type": "string" },
+    "created_at": { "type": "string" },
+    "locked": { "type": "boolean" },
+    "locked_at": { "type": "string" },
+    "owner_consent": {
+      "type": "object",
+      "properties": { "likeness_consent": { "type": "boolean" }, "recorded_on": { "type": "string" } }
+    },
+    "raw": {
+      "type": "object",
+      "description": "Owner recordings — source material only, NEVER rendered.",
+      "properties": {
+        "face_turn": { "$ref": "#/$defs/recording" },
+        "performance": { "$ref": "#/$defs/recording" },
+        "voice_read": { "$ref": "#/$defs/recording" }
+      },
+      "additionalProperties": false
+    },
+    "identity": {
+      "type": "object",
+      "required": ["canonical"],
+      "properties": {
+        "canonical": { "type": "string", "description": "Relative path, e.g. identity/canonical.png" },
+        "picked_candidate": { "type": "string" },
+        "candidates": { "type": "array", "items": { "type": "string" } },
+        "model": { "type": "string" },
+        "tweaks": { "type": "string" },
+        "wardrobe_catalog": { "type": "string" },
+        "identity_transform": { "const": "beautified" }
+      }
+    },
+    "voice": {
+      "type": "object",
+      "required": ["profile"],
+      "properties": {
+        "profile": { "type": "string", "description": "Relative path, e.g. voice/voice_profile.json" },
+        "picked_candidate": { "type": "string" },
+        "engine": { "type": "string" },
+        "watermark_note": { "type": "string" }
+      }
+    },
+    "engine_default": { "type": "string", "enum": ["hybrid", "local"], "description": "Twin engine default chosen after the P5 bake-off." },
+    "files": {
+      "type": "object",
+      "description": "relative path -> sha256 of every file in the profile except profile.json",
+      "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "locked": { "const": true } }, "required": ["locked"] },
+      "then": {
+        "required": ["identity", "voice", "locked_at"],
+        "properties": { "files": { "minProperties": 2 } }
+      }
+    }
+  ],
+  "$defs": {
+    "recording": {
+      "type": "object",
+      "required": ["file", "sha256"],
+      "properties": {
+        "file": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "probe": { "type": "object" }
+      }
+    }
+  }
+}

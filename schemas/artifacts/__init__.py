@@ -36,6 +36,7 @@ ARTIFACT_NAMES = [
     "input_manifest",
     "fact_sheet",
     "capture_script",
+    "presenter_profile",
 ]
 
 

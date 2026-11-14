@@ -1302,3 +1302,251 @@ class TestV3SandboxToolAndLock:
         lock.write_text(json.dumps({"pid": 999999, "label": "dead", "since": 0}))
         with heavy_job("c", lock):
             assert current_holder(lock)["label"] == "c"
+
+
+# ---------------------------------------------------------------------------
+# v3 fast checks (P4): presenter profile, guards, recording validation, voice lab
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def profile_root(tmp_path, monkeypatch):
+    root = tmp_path / "profiles"
+    monkeypatch.setenv("OPENMONTAGE_PROFILE_ROOT", str(root))
+    return root
+
+
+def _tiny_clip(path: Path, seconds: float = 1.0, audio: bool = True, size="320x240"):
+    import subprocess
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc=size={size}:rate=30:duration={seconds}"]
+    if audio:
+        cmd += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}", "-shortest"]
+    subprocess.run(cmd + [str(path)], check=True)
+    return path
+
+
+class TestV3PresenterProfile:
+    def test_create_lock_verify_roundtrip(self, profile_root):
+        import stat
+        from lib import presenter_profile as pp
+
+        d = pp.create_profile("owner")
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700 and stat.S_IMODE((d / "raw").stat().st_mode) == 0o700
+        with pytest.raises(pp.ProfileError):
+            pp.lock_profile("owner")  # no canonical/voice yet
+        (d / "identity" / "canonical.png").write_bytes(b"png")
+        (d / "voice" / "voice_profile.json").write_text("{}")
+        prof = pp.read_profile("owner")
+        prof["identity"] = {"canonical": "identity/canonical.png"}
+        prof["voice"] = {"profile": "voice/voice_profile.json"}
+        pp.write_profile(d, prof)
+        locked = pp.lock_profile("owner")
+        assert locked["locked"] and len(locked["files"]) == 2
+        assert all(len(v) == 64 for v in locked["files"].values())
+        assert pp.verify_profile("owner") == []
+        (d / "identity" / "canonical.png").write_bytes(b"tampered")
+        assert any("hash mismatch" in p for p in pp.verify_profile("owner"))
+
+    def test_invalid_ids_and_unlocked_profile_cannot_mint(self, profile_root, tmp_path):
+        from lib import presenter_profile as pp
+
+        with pytest.raises(pp.ProfileError):
+            pp.profile_dir("../escape")
+        pp.create_profile("p1")
+        out = _tiny_clip(tmp_path / "twin.mp4")
+        with pytest.raises(pp.ProfileError, match="locked"):
+            pp.mint_presenter_asset("p1", out, asset_type="presenter_video", variant_id="v", source_tool="t")
+
+    def test_guard_rejects_raw_recording_even_if_it_claims_beautified(self, profile_root, tmp_path):
+        from lib import presenter_profile as pp
+        from lib.asset_resolver import AssetResolver
+        from lib.presenter_guard import PresenterGuardError, presenter_asset_problems
+
+        d = pp.create_profile("owner")
+        raw = _tiny_clip(d / "raw" / "performance.mp4")
+        assert pp.is_inside_profile_raw(raw)
+        liar = {"asset_id": "p", "asset_type": "presenter_video", "path": str(raw), "identity_transform": "beautified", "profile_id": "owner"}
+        assert any("raw/" in p for p in presenter_asset_problems(liar))
+        plan = {"version": "2.0", "sections": [{"section_id": "s", "script_section_id": "s", "visual_beats": [{"beat_id": "b", "visual_type": "diagram"}]}]}
+        with pytest.raises(PresenterGuardError):
+            AssetResolver(tmp_path / "proj").resolve_assets(plan, [], presenter_asset=liar)
+        # minting refuses a raw path outright
+        with pytest.raises(pp.ProfileError, match="raw"):
+            pp.mint_presenter_asset("owner", raw, asset_type="presenter_video", variant_id="v", source_tool="t")
+
+    def test_locked_profile_mints_valid_beautified_asset(self, profile_root, tmp_path):
+        from lib import presenter_profile as pp
+        from lib.presenter_guard import is_real_presenter_asset
+        from schemas.artifacts import validate_artifact
+
+        d = pp.create_profile("owner")
+        (d / "identity" / "canonical.png").write_bytes(b"png")
+        (d / "voice" / "voice_profile.json").write_text("{}")
+        prof = pp.read_profile("owner")
+        prof["identity"], prof["voice"] = {"canonical": "identity/canonical.png"}, {"profile": "voice/voice_profile.json"}
+        pp.write_profile(d, prof)
+        pp.lock_profile("owner")
+        proj = tmp_path / "proj"
+        out = _tiny_clip(proj / "assets" / "presenter" / "twin_pip.mp4")
+        asset = pp.mint_presenter_asset("owner", out, asset_type="presenter_video", variant_id="casual", source_tool="twin_lipsync", project_dir=proj)
+        assert asset["identity_transform"] == "beautified" and asset["profile_id"] == "owner"
+        assert asset["path"] == "assets/presenter/twin_pip.mp4"
+        assert is_real_presenter_asset(asset)
+        validate_artifact("asset_manifest", {"version": "2.0", "assets": [asset]})
+
+    def test_presenter_profile_tool_status_and_checks(self, profile_root):
+        from tools.presenters.presenter_profile import PresenterProfileTool
+
+        t = PresenterProfileTool()
+        assert t.execute({"operation": "init", "profile_id": "owner"}).success
+        assert t.execute({"operation": "status", "profile_id": "owner"}).data["locked"] is False
+        assert t.execute({"operation": "verify", "profile_id": "owner"}).success is False  # not locked
+        res = t.execute({"operation": "check_asset", "asset": {"asset_type": "presenter_video", "path": "x/TEST_ONLY_a.mp4"}})
+        assert res.success is False and "beautified" in res.error
+
+
+class TestV3RecordingValidation:
+    def test_rejects_low_res_and_short_clips(self, tmp_path):
+        from lib.recording_validation import validate_recording
+
+        res = validate_recording("face_turn", _tiny_clip(tmp_path / "a.mp4", seconds=1.0))
+        assert res["ok"] is False
+        joined = " ".join(res["problems"])
+        assert "below 1080p" in joined and "too short" in joined
+
+    def test_missing_file_unknown_kind_and_audio_levels(self, tmp_path):
+        import numpy as np
+        from lib.recording_validation import audio_levels, validate_recording
+
+        assert validate_recording("voice_read", tmp_path / "none.wav")["ok"] is False
+        with pytest.raises(ValueError):
+            validate_recording("nope", tmp_path / "x")
+        rate = 16000
+        quiet = np.random.default_rng(0).normal(0, 0.001, rate * 2).astype(np.float32)
+        loud = np.concatenate([quiet, np.full(rate, 1.0, dtype=np.float32)])
+        assert audio_levels(quiet)["noise_floor_dbfs"] < -45
+        assert audio_levels(loud)["peak_dbfs"] > -1.0
+
+    def test_good_voice_read_passes_its_checks(self, tmp_path):
+        import subprocess
+        from lib.recording_validation import validate_recording
+
+        wav = tmp_path / "v.wav"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anoisesrc=color=pink:amplitude=0.0008:duration=160:sample_rate=48000",
+                        "-ac", "1", str(wav)], check=True)
+        res = validate_recording("voice_read", wav)
+        assert res["ok"] is True, res["problems"]
+
+
+class TestV3VoiceLab:
+    def test_kokoro_recipe_validation_and_blend_math(self):
+        import numpy as np
+        from lib import voice_lab as vl
+
+        vl.validate_kokoro_recipe({"voices": [["af_heart", 0.6], ["af_bella", 0.4]], "speed": 1.0})
+        for bad in ({"voices": [["a", 0.5], ["b", 0.4]]}, {"voices": []}, {"voices": [["a", 1.0]], "speed": 5}):
+            with pytest.raises(ValueError):
+                vl.validate_kokoro_recipe(bad)
+        out = vl.blend_arrays([np.ones(3), np.zeros(3)], [0.25, 0.75])
+        assert np.allclose(out, 0.25)
+        name = vl.blend_name({"voices": [["af_heart", 0.5], ["af_bella", 0.5]]})
+        assert name.startswith("af_blend_") and name == vl.blend_name({"voices": [["af_heart", 0.5], ["af_bella", 0.5]]})
+
+    def test_candidate_plan_is_about_eight_and_valid(self):
+        from lib import voice_lab as vl
+
+        assert len(vl.KOKORO_BLENDS) + len(vl.CHATTERBOX_BLENDS) == 8
+        for r in vl.KOKORO_BLENDS:
+            vl.validate_kokoro_recipe(r)
+        for r in vl.CHATTERBOX_BLENDS:
+            vl.validate_chatterbox_recipe(r)
+        assert {round(r["owner_weight"], 1) for r in vl.CHATTERBOX_BLENDS} >= {0.7, 0.5, 0.3}
+
+    def test_candidates_page_and_voice_profile(self, tmp_path):
+        from lib import voice_lab as vl
+
+        items = [
+            {"id": "k1", "audio": "k1.wav", "recipe": {"engine": "kokoro"}},
+            {"id": "c1", "status": "unavailable", "reason": "chatterbox backend not installed", "recipe": {"engine": "chatterbox"}},
+        ]
+        page = vl.write_candidates_page(tmp_path, items).read_text()
+        assert '<audio controls' in page and 'src="k1.wav"' in page
+        assert "unavailable" in page and "chatterbox backend not installed" in page
+        prof = vl.build_voice_profile({"candidate_id": "k1", "engine": "kokoro", "recipe": {"voices": [["af_heart", 1.0]]}}, model_version="m")
+        assert prof["polish_chain"]["name"] == "om-voice-polish-v1" and prof["seed"] == 1234
+
+    def test_voice_lab_reports_chatterbox_unavailable_honestly(self):
+        from tools.audio.voice_lab import VoiceLab, chatterbox_available
+
+        registry.discover()
+        assert registry.get("voice_lab") is not None
+        if not chatterbox_available():
+            assert VoiceLab().get_status() == ToolStatus.DEGRADED
+
+    def test_mlx_tts_refuses_non_kokoro_voice_profile(self, tmp_path):
+        prof = tmp_path / "voice_profile.json"
+        prof.write_text(json.dumps({"engine": "chatterbox", "recipe": {}}))
+        res = MlxTTSProvider().execute({"text": "hi", "voice_profile": str(prof), "output_path": str(tmp_path / "o.wav")})
+        assert res.success is False and "ask the owner" in res.error
+
+
+class TestV3TwinIdentityGuards:
+    def _setup(self, profile_root):
+        from lib import presenter_profile as pp
+
+        return pp.create_profile("owner")
+
+    def test_paid_calls_blocked_without_approval(self, profile_root, monkeypatch):
+        from tools.presenters.twin_identity import TwinIdentity
+
+        d = self._setup(profile_root)
+        (d / "identity" / "refs" / "still_01.png").write_bytes(b"x")
+        monkeypatch.delenv("ALLOW_PAID_APIS", raising=False)
+        t = TwinIdentity()
+        monkeypatch.setattr(t, "_imagen", lambda: pytest.fail("must not call the image API"))
+        r1 = t.execute({"operation": "beautify", "profile_id": "owner"})
+        assert r1.success is False and "not approved" in r1.error
+        r2 = t.execute({"operation": "beautify", "profile_id": "owner", "paid_call_approved": True})
+        assert r2.success is False and "ALLOW_PAID_APIS" in r2.error
+
+    def test_beautify_pick_and_wardrobe_with_mocked_imagen(self, profile_root, monkeypatch):
+        from PIL import Image
+        from tools.base_tool import ToolResult
+        from tools.presenters.twin_identity import TwinIdentity
+
+        d = self._setup(profile_root)
+        (d / "identity" / "refs" / "still_01.png").write_bytes(b"x")
+        monkeypatch.setenv("ALLOW_PAID_APIS", "true")
+        calls = []
+
+        class FakeImagen:
+            def execute(self, inp):
+                calls.append(inp)
+                Image.new("RGB", (64, 36), "gray").save(inp["output_path"])
+                return ToolResult(success=True)
+
+        t = TwinIdentity()
+        monkeypatch.setattr(t, "_imagen", lambda: FakeImagen())
+        res = t.execute({"operation": "beautify", "profile_id": "owner", "count": 2, "paid_call_approved": True})
+        assert res.success and len(res.data["candidates"]) == 2 and calls[0]["image_paths"]
+        assert t.execute({"operation": "wardrobe", "profile_id": "owner", "paid_call_approved": True,
+                          "variant_id": "x", "description": "grey hoodie"}).success is False  # no canonical yet
+        assert t.execute({"operation": "pick_canonical", "profile_id": "owner", "candidate": "cand_02"}).success
+        res = t.execute({"operation": "wardrobe", "profile_id": "owner", "paid_call_approved": True,
+                         "variant_id": "coding", "description": "grey hoodie", "tags": ["coding"]})
+        assert res.success
+        catalog = json.loads((d / "identity" / "wardrobe_catalog.json").read_text())
+        assert catalog[0]["id"] == "coding" and catalog[0]["tags"] == ["coding"]
+
+    def test_extract_stills_spreads_choice_and_flags_missing_mediapipe(self, profile_root, tmp_path):
+        from tools.presenters.twin_identity import TwinIdentity, _mediapipe_faces
+
+        d = self._setup(profile_root)
+        _tiny_clip(d / "raw" / "face_turn.mp4", seconds=3.0, size="640x360")
+        res = TwinIdentity().execute({"operation": "extract_stills", "profile_id": "owner", "count": 4})
+        if _mediapipe_faces() is None:
+            assert res.success and "unavailable" in res.data["face_detection"]
+            assert len(res.data["stills"]) == 4
+        assert not (d / "identity" / "refs" / "_all").exists()

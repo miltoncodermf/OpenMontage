@@ -34,6 +34,11 @@ def presenter_asset_problems(asset: dict[str, Any]) -> list[str]:
     parts = {p.lower() for p in Path(path.replace("\\", "/")).parts}
     if parts & RAW_DIR_NAMES and ("presenter_profiles" in parts or asset.get("source_type") == "owner_raw"):
         problems.append("raw owner recording cannot be rendered (onboarding source only)")
+    if path:
+        from lib.presenter_profile import is_inside_profile_raw
+
+        if is_inside_profile_raw(path):
+            problems.append("path is inside a presenter profile raw/ directory (owner recording, never rendered)")
     if asset.get("source_type") in {"user_supplied", "owner_raw", "onboarding_source"}:
         problems.append(f"source_type {asset.get('source_type')!r} is an onboarding source, never rendered")
     return problems
