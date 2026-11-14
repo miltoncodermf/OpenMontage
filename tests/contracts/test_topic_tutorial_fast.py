@@ -2203,3 +2203,24 @@ class TestFixRound1GroupA:
         assert est > 0 and est == gp.estimate_calls_usd("gemini-3.1-flash-image", 6)
         assert gp.SOURCE_URL.startswith("https://") and gp.AS_OF
         assert TwinIdentity().estimate_cost({"operation": "extract_stills", "profile_id": "x"}) == 0.0
+
+
+class TestFixRound1ResearchReadiness:
+    def test_research_stage_tools_and_reference_only_rule(self):
+        import yaml
+        from lib.research_contract import asset_rights_problems, brief_problems
+
+        m = yaml.safe_load(open(REPO_ROOT / "pipeline_defs" / "topic-tutorial.yaml"))
+        stages = {s["name"]: s for s in m["stages"]}
+        research = stages["research"]["tools_available"]
+        assert "sandbox_capture" in research and "video_downloader" in research
+        assert {"pexels_image", "pixabay_image"} <= set(research) and {"pexels_image", "pixabay_image"} <= set(stages["assets"]["tools_available"])
+        registry.discover()
+        assert all(registry.get(t) is not None for t in research + stages["assets"]["tools_available"]), "pipeline lists an unregistered tool"
+        rights = {"rights_status": "open", "license": "CC0", "source_url": "https://x", "attribution": "x", "retrieved_at": "2026-11-14"}
+        ok = {"assets": [{"asset_id": "c1", "asset_type": "sourced_clip", **rights, "source_tool": "direct_clip_search"}]}
+        assert asset_rights_problems(ok) == []
+        bad = {"assets": [{"asset_id": "c2", "asset_type": "sourced_clip", **rights, "source_tool": "video_downloader"}]}
+        assert any("video_downloader" in p for p in asset_rights_problems(bad))
+        brief = {"data_points": [], "media_candidates": [{"candidate_id": "m", "kind": "clip", "provider": "transcript_fetcher", **rights}]}
+        assert any("reference-only" in p for p in brief_problems(brief))

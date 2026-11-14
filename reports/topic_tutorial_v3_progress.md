@@ -175,3 +175,38 @@ Source: `docs/topic-tutorial-v3-fixes.md` (Opus audit). Commits are per group: `
 Commands and results:
 - `.venv/bin/pytest tests/contracts/test_topic_tutorial_fast.py -q` → 119 passed
 - `.venv/bin/pytest tests/ -q -p no:cacheprovider` (**no exclusions**) → **3093 passed, 15 skipped** in 120 s (skips: optional playwright, footage/golden fixtures, live-doc checks, smoke opt-in).
+
+### Group C — Smoke flakiness (F5)
+
+Command: `.venv/bin/pytest -m smoke tests/contracts/test_topic_tutorial_smoke.py --tb=long -p no:cacheprovider -q` under `/usr/bin/time -l`, logs in the scratchpad (`run1..5.log`).
+
+| run | conditions | result | wall | peak RSS |
+|---|---|---|---|---|
+| 1 | **cold**: fresh process, `remotion-composer/node_modules/.cache` and `$TMPDIR/remotion*` removed first | passed | 55.8 s | 1.07 GB |
+| 2–5 | sequential, fresh process each | 4 × passed | 54.9–55.8 s | 1.22 GB |
+| load | 14 busy-loop processes competing for CPU | passed | 68.7 s | – |
+
+So **5/5 pass and the audit's failure (1 in 4, output not captured) did not reproduce** — including a cold run and a CPU-starved run. What I checked and ruled out:
+- Alignment/caption assertions: 8 fresh Kokoro narrations → `script_aligner`, all `asr_anchored`, 32 tokens, monotonic and inside the audio every time; narration length is a stable 12.93 s (assertion window 7–16 s).
+- Duration/loudness assertions have margin (mastered through the render within the ±1.5 LU window in every run).
+
+Most plausible remaining causes (not proven), and what I changed:
+1. Remotion's default 30 s headless-browser setup timeout on a cold Chrome launch → the smoke render now passes `remotion_timeout_ms=180000`.
+2. Two heavy jobs at once (a second pytest session or a real render fighting for CPU/RAM) → the smoke render now takes the host-wide heavy lock (`wait=900`) so it queues instead of racing. Verified in practice: the first hardened run started while a sandbox capture held the lock, queued behind it (80.7 s) and passed.
+No assertion was loosened. Re-run after hardening: 5 × passed (80.7 s incl. queueing, then 68.0 / 68.2 / 67.9 / 67.8 s). The ~12 s increase over the 55 s baseline appeared with the hardening (the `--timeout` flag and/or the lock wrapper) and was not investigated further. If the flake ever recurs, the test failure message now carries the Remotion error tail (`res.error`) — capture it.
+
+### Group D — Research & capture readiness (F10, F14; F15 not run)
+
+**F10.**
+- `pipeline_defs/topic-tutorial.yaml`: research stage gained `sandbox_capture`, `pexels_image`, `pixabay_image`, `direct_clip_search`; assets stage gained `pexels_image`, `pixabay_image`. Registry check: image/stock tools found by capability are `pexels_image`/`pixabay_image` (stills; currently *unavailable* — no API keys), `direct_clip_search` (available), `clip_search`, `corpus_builder`; no Wikimedia/Openverse tool exists, so open-licensed Commons/NASA images come from web search. A fast test asserts every tool the manifest lists is registered.
+- `video_downloader`/`transcript_fetcher` stay for reference-video analysis only. Hard rule added to `research-director.md`; `lib/research_contract.py` (`asset_rights_problems`, `brief_problems`) now flags any `sourced_clip` / clip candidate whose `source_tool`/`provider`/`source_type` is one of them. Fast test: `TestFixRound1ResearchReadiness`.
+- Manifest review line corrected from "forced alignment" to script-anchored (`asr_anchored`).
+- **Dry run** (topic "How Apple Silicon unified memory speeds up local AI inference"), under `projects/dev-research-dryrun/` (gitignored): `artifacts/research_brief.json` and `artifacts/fact_sheet.json`, both schema-valid; `brief_problems() == []`; `script_claim_problems() == []`; 4 data points, 7 sources, 3 angles, 3 media candidates with rights fields (a CC0 Wikimedia image whose file-page licence I read, an own-capture of the MLX docs page, an attributed screenshot of Apple's article). Honest limits: I ran the planner/worker pattern inline with search and fetch tools, not as separate sub-agents; only 4 pages were actually fetched and read (Apple ML Research article dated 2026-10-15, WWDC25 session 315, MLX docs, two Commons file pages); the blog-sourced facts come from search summaries, so they carry `verified: false` and medium/low confidence; the MLX docs-site licence is inferred from the repo's MIT licence; the first Commons M1 file has a conflicting EXIF copyright and was not used.
+- **Sandbox screenshot of an allowed public page**: `SandboxCapture` `run`, surface `browser`, `allow_domains: [ml-explore.github.io]` → `assets/captures/mlx_unified_memory_page/` (`capture.mp4` 1920×1080 30 fps 5.5 s, `screenshots/mlx_unified_memory_doc.png` showing the MLX "Unified Memory" page, `network.json`: only `ml-explore.github.io` allowed; Chromium's background calls to `accounts.google.com`/`www.google.com` were **denied**; `iptables: true`).
+
+**F14 (remaining part).** The reading script and owner guide were written in Group A. This group expanded all six `presenter-onboarding` skills with failure handling (validator failure → re-record request, max 3 attempts; identity drift → regenerate within the approved budget with `paid_call_guard`; rejected voices → round 2 with new ratios; locking/verify failures) and pointed `capture-session-director.md` to both files.
+
+**F15.** Not run: no planned capture needs an owner login yet; to be exercised in Group E only if one does.
+
+Commands and results:
+- `.venv/bin/pytest tests/contracts -q -p no:cacheprovider` → 1681 passed, 10 skipped.

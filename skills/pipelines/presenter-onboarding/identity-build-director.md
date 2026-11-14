@@ -7,3 +7,9 @@ Goal: 4–6 subtle, photoreal, clearly-the-owner canonical candidates plus 2–3
 3. `beautify` with 4–6 variations. Prompts (lib/twin_prompts.py) ask for *subtle* improvement: skin/light/grooming/framing; recognisably the owner; photoreal; studio background; head-and-shoulders; neutral expression, mouth closed. Reject over-smoothed or unlike results and regenerate within the approved budget.
 4. Create 2–3 starter wardrobe variants (`wardrobe`, e.g. casual-tech, smart-casual, dark-hoodie) from the picked/likely canonical — only after step 2's approval covers them.
 5. Show the candidates (file paths in the profile) and checkpoint; the owner picks in `identity_lock`.
+
+## Failure handling
+- **Identity drift** (candidate doesn't look like the owner, over-smoothed, different age/ethnicity/face shape, extra teeth/open mouth, artefacts): drop it, tighten the prompt (state the specific failure to avoid in the prompt text built by `lib/twin_prompts.py`, pass more `refs/` stills), and regenerate **only within the approved budget** — before each regeneration run `lib/paid_call_guard.check_paid_call`; if it returns `allowed: false` (not itemized or past 1.2× the approved total) stop and ask the owner for more budget instead of continuing.
+- **Fewer than 4 acceptable candidates after the budget is spent:** present the good ones and say so plainly; don't pad with weak ones.
+- **No Gemini key / API error / safety block:** report the exact error (never the key), keep any candidates already produced, and ask the owner how to proceed. No engine substitution.
+- **MediaPipe missing:** the tool reports it; install it (small, Apache-2.0) or tell the owner the stills were picked by sharpness only.

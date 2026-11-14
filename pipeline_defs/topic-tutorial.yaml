@@ -75,9 +75,13 @@ stages:
       - universal_ingestor
       - video_analyzer
       - transcript_fetcher
-      - video_downloader
+      - video_downloader        # reference-video analysis ONLY (never a source of clips in the video)
       - scene_detect
       - frame_sampler
+      - sandbox_capture         # self-captured URL screenshots / evidence
+      - pexels_image            # open-licensed stills (needs PEXELS_API_KEY; check get_status)
+      - pixabay_image           # open-licensed stills (needs PIXABAY_API_KEY; check get_status)
+      - direct_clip_search      # archive/open footage discovery
     checkpoint_required: false
     human_approval_default: false
     review_focus:
@@ -164,6 +168,8 @@ stages:
       - alignment_provider
       - code_snippet
       - direct_clip_search
+      - pexels_image
+      - pixabay_image
       - sandbox_capture
       - presenter_profile
       - twin_identity
@@ -176,7 +182,7 @@ stages:
     human_approval_default: true
     review_focus:
       - Narration audio generated with clean speech and dynamic sample rate
-      - Word timings come from forced alignment; alignment_method is stated (heuristic fallback flagged)
+      - Word timings come from script-anchored alignment (asr_anchored); alignment_method is stated (heuristic fallback flagged)
       - Presenter assets are beautified-twin assets from the presenter profile, or presenter_status is skipped_failed with a reason (never a fixture)
       - Visual assets (diagrams, screen captures, broll) satisfied for every visual beat
     success_criteria:

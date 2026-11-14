@@ -11,3 +11,6 @@ One-time pipeline that builds the owner's **private presenter profile** used by 
 - Model downloads ≥ 500 MB (e.g. Chatterbox weights): disk check + owner confirmation first.
 - Never substitute a different engine or path around a 🛑; blockers follow the AGENT_GUIDE structure.
 - Honesty: never describe a fixture or placeholder as a real recording or identity.
+
+## Failure handling (all stages)
+Report failures in the AGENT_GUIDE blocker format (what failed, why, options, recommendation). Validator failure → re-record request (capture); identity drift → regenerate within the approved budget (build); rejected voices → round 2 with new ratios (lab). Never lower a threshold, reuse a fixture, or switch engine/path to get past a failure.

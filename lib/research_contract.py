@@ -12,6 +12,8 @@ from typing import Any
 
 RIGHTS_FIELDS = ("rights_status", "license", "source_url", "attribution", "retrieved_at")
 SOURCED_ASSET_TYPES = {"sourced_image", "sourced_clip"}
+# Reference-video analysis only: these tools may never be the origin of a clip used in the video (D13).
+REFERENCE_ONLY_TOOLS = {"video_downloader", "transcript_fetcher"}
 
 
 def brief_problems(brief: dict[str, Any]) -> list[str]:
@@ -23,6 +25,8 @@ def brief_problems(brief: dict[str, Any]) -> list[str]:
         missing = [f for f in RIGHTS_FIELDS if not mc.get(f)]
         if missing:
             problems.append(f"media_candidates[{i}] missing rights fields {missing}")
+        if mc.get("kind") == "clip" and _origin_tools(mc) & REFERENCE_ONLY_TOOLS:
+            problems.append(f"media_candidates[{i}]: clip candidate comes from a reference-only tool; third-party clips are never allowed")
     return problems
 
 
@@ -55,11 +59,20 @@ def script_claim_problems(script_fact_ids: list[str], fact_sheet: dict[str, Any]
     return problems
 
 
+def _origin_tools(item: dict[str, Any]) -> set[str]:
+    return {str(item[k]).lower() for k in ("source_tool", "provider", "provider_id", "source_type") if item.get(k)}
+
+
 def asset_rights_problems(asset_manifest: dict[str, Any]) -> list[str]:
     problems = []
     for a in asset_manifest.get("assets", []):
-        if (a.get("asset_type") or a.get("type")) in SOURCED_ASSET_TYPES:
+        kind = a.get("asset_type") or a.get("type")
+        if kind in SOURCED_ASSET_TYPES:
             missing = [f for f in RIGHTS_FIELDS if not a.get(f)]
             if missing:
                 problems.append(f"{a.get('asset_id') or a.get('id')}: missing rights fields {missing}")
+        if kind == "sourced_clip" and _origin_tools(a) & REFERENCE_ONLY_TOOLS:
+            problems.append(f"{a.get('asset_id') or a.get('id')}: sourced_clip originates from "
+                            f"{sorted(_origin_tools(a) & REFERENCE_ONLY_TOOLS)} — third-party video clips are never allowed "
+                            "(video_downloader/transcript_fetcher are for reference-video analysis only)")
     return problems
