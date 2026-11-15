@@ -162,6 +162,7 @@ stages:
       - gemini_omni_video
       - diagram_gen
       - screenshot_import
+      - sourced_image_import    # rights-checked import of one approved open-licensed still by URL
       - screen_recording_import
       - script_aligner
       - transcriber

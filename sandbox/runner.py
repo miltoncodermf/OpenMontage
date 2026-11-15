@@ -128,7 +128,7 @@ def start_surface():
         base_url = "http://127.0.0.1:8080/?folder=/workspace"
     elif SURFACE == "terminal":
         procs.append(subprocess.Popen(
-            ["ttyd", "-W", "-i", "127.0.0.1", "-p", "7681", "-t", "fontSize=26",
+            ["ttyd", "-W", "-i", "127.0.0.1", "-p", "7681", "-t", "fontSize=26", "-t", "rendererType=dom",
              "-t", "theme={\"background\":\"#0b1020\"}", "bash"],
             stdout=open(f"{OUT}/ttyd.log", "w"), stderr=subprocess.STDOUT))
         base_url = "http://127.0.0.1:7681/"
@@ -152,9 +152,13 @@ def wait_port(port, timeout=60):
 
 
 async def page_text(page):
+    """Visible text for ``wait_for_text``: the page text, the xterm DOM rows, and — because ttyd's default canvas/webgl
+    renderer draws no DOM text — the xterm buffer itself (``window.term``), which is what the terminal really shows."""
     return await page.evaluate(
-        "() => (document.body ? document.body.innerText : '') + '\\n' + "
-        "Array.from(document.querySelectorAll('.xterm-rows, .xterm-accessibility-tree')).map(e => e.textContent).join('\\n')")
+        "() => { let buf = ''; try { const t = window.term; if (t && t.buffer && t.buffer.active) { const b = t.buffer.active; "
+        "for (let i = 0; i < b.length; i++) { const l = b.getLine(i); if (l) buf += l.translateToString(true) + '\\n'; } } } catch (e) {} "
+        "return (document.body ? document.body.innerText : '') + '\\n' + "
+        "Array.from(document.querySelectorAll('.xterm-rows, .xterm-accessibility-tree')).map(e => e.textContent).join('\\n') + '\\n' + buf; }")
 
 
 async def run():
@@ -209,6 +213,9 @@ async def run():
                 elif action == "click":
                     loc = page.locator(step["selector"]).first
                     await loc.wait_for(state="visible", timeout=15000)
+                    # bring the target to the middle of the screen first, so the cursor glide and the next frames show it
+                    await loc.evaluate("e => e.scrollIntoView({block: 'center', behavior: 'instant'})")
+                    await asyncio.sleep(0.4)
                     box = await loc.bounding_box()
                     if box:
                         await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=30)

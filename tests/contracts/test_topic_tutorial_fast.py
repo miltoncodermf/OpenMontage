@@ -2733,3 +2733,48 @@ class TestFixRound1GroupEAdapter:
                  self._beat("d3", "diagram", diagram_id="D2", diagram_spec=spec)]
         cuts = self._compile(beats, [])["cuts"]
         assert [c.get("diagramContinue", False) for c in cuts] == [False, True, False]
+
+
+class TestFixRound1GroupESourcedImageImport:
+    RIGHTS = {"rights_status": "public_domain_dedication", "license": "CC0 1.0", "source_url": "https://commons.wikimedia.org/wiki/File:X.jpg",
+              "attribution": "X by Y, CC0 1.0"}
+
+    def _png(self):
+        import io
+        from PIL import Image
+
+        b = io.BytesIO()
+        Image.new("RGB", (64, 36), "red").save(b, "PNG")
+        return b.getvalue()
+
+    def _tool(self, monkeypatch, body, ctype="image/png"):
+        from tools.visuals.sourced_image_import import SourcedImageImport
+
+        monkeypatch.setattr(SourcedImageImport, "_fetch", lambda self, url, allowed: (body, ctype, url))
+        return SourcedImageImport()
+
+    def test_registered_and_imports_with_rights_record(self, tmp_path, monkeypatch):
+        registry.discover()
+        assert registry.get("sourced_image_import") is not None
+        body = self._png()
+        res = self._tool(monkeypatch, body).execute({"url": "https://upload.wikimedia.org/a.png", "output_path": str(tmp_path / "a.png"),
+                                                     "asset_id": "img1", "expected_bytes": len(body), **self.RIGHTS})
+        assert res.success, res.error
+        a = res.data["asset"]
+        assert a["asset_type"] == "sourced_image" and a["width"] == 64 and a["retrieved_at"] and a["license"] == "CC0 1.0"
+        assert (tmp_path / "a.png").read_bytes() == body
+
+    def test_missing_rights_wrong_type_wrong_size_and_bad_host_are_refused(self, tmp_path, monkeypatch):
+        from tools.visuals.sourced_image_import import SourcedImageImport
+
+        body = self._png()
+        t = self._tool(monkeypatch, body)
+        base = {"url": "https://upload.wikimedia.org/a.png", "output_path": str(tmp_path / "a.png"), **self.RIGHTS}
+        assert not t.execute({**base, "attribution": ""}).success
+        assert "size mismatch" in t.execute({**base, "expected_bytes": 1}).error
+        assert "not an image" in self._tool(monkeypatch, b"<html>", "text/html").execute(base).error
+        assert not (tmp_path / "a.png").exists()
+        monkeypatch.undo()
+        res = SourcedImageImport().execute({**base, "url": "https://evil.example.com/a.png"})
+        assert not res.success and "allow-listed" in res.error
+        assert not SourcedImageImport().execute({**base, "url": "http://upload.wikimedia.org/a.png"}).success
