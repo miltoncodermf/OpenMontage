@@ -2573,3 +2573,91 @@ class TestSandboxCleanup:
         assert d.parse_images('{"Repository":"openmontage-capture","Tag":"abc"}\n{"Repository":"<none>","Tag":"<none>"}\n') == ["openmontage-capture:abc"]
         rows = d.parse_containers('{"Names":"om-capture-x-1","State":"exited","Image":"openmontage-capture:abc"}\n')
         assert rows == [{"name": "om-capture-x-1", "state": "exited", "image": "openmontage-capture:abc"}]
+
+
+class TestFixRound1GroupEIngestion:
+    """Defects found by the Group E validation run (first real repo + URL ingest)."""
+
+    def test_repo_focus_is_applied_before_the_file_limit(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / "a_early").mkdir(parents=True)
+        for i in range(30):
+            (repo / "a_early" / f"f{i:02d}.md").write_text("early file\n")
+        (repo / "zz" / "deep").mkdir(parents=True)
+        (repo / "zz" / "deep" / "target.md").write_text("# Target\nthe focused file\n")
+        files = UniversalIngestor()._collect_directory_files(repo, 5, focus=["zz/deep"])
+        assert [f.name for f in files] == ["target.md"]
+
+    def test_repo_focus_cannot_escape_the_root(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (tmp_path / "secret.md").write_text("outside\n")
+        assert UniversalIngestor()._collect_directory_files(repo, 5, focus=["../secret.md"]) == []
+
+    def test_gitignore_directory_entries_with_trailing_slash_are_honoured(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / "projects").mkdir(parents=True)
+        (repo / "projects" / "x.md").write_text("generated\n")
+        (repo / "docs.md").write_text("kept\n")
+        (repo / ".gitignore").write_text("projects/\n")
+        names = {f.name for f in UniversalIngestor()._collect_directory_files(repo, 50)}
+        assert "x.md" not in names and "docs.md" in names
+
+    def test_url_redirects_are_followed_but_every_hop_is_ssrf_checked(self, monkeypatch):
+        import requests
+
+        calls = []
+
+        class Resp:
+            def __init__(self, status, headers=None, body=b""):
+                self.status_code, self.headers, self._body, self.reason = status, headers or {}, body, "x"
+
+            def iter_content(self, chunk_size=0):
+                yield self._body
+
+            def close(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_get(url, **kw):
+            calls.append(url)
+            if url.endswith("/old"):
+                return Resp(308, {"Location": "/new"})
+            if url.endswith("/evil"):
+                return Resp(302, {"Location": "http://127.0.0.1/admin"})
+            return Resp(200, body=b"<html><title>New</title><body>hello world</body></html>")
+
+        monkeypatch.setattr(requests, "get", fake_get)
+        monkeypatch.setattr("tools.ingestion.universal_ingestor._validate_public_url",
+                            lambda u: "private address" if "127.0.0.1" in u else None)
+        ok = UniversalIngestor()._ingest_url("https://example.com/old", "src_001")
+        assert ok["status"] == "supported" and "hello world" in ok["content"]
+        bad = UniversalIngestor()._ingest_url("https://example.com/evil", "src_002")
+        assert bad["status"] == "unsupported" and "refused" in bad["error"]
+        assert not any("127.0.0.1" in c for c in calls)
+
+
+class TestFixRound1GroupEDecisionLog:
+    def test_topic_tutorial_decision_categories_are_schema_valid(self):
+        from schemas.artifacts import validate_artifact
+
+        cats = ["model_routing", "presenter_engine", "presenter_wardrobe", "voice_profile", "music",
+                "playbook", "capture_plan", "alignment_method", "render_runtime_selection", "composition_mode"]
+        log = {"version": "1.0", "project_id": "p", "decisions": [
+            {"decision_id": f"d-{i}", "stage": "proposal", "category": c, "subject": f"s-{c}",
+             "options_considered": [{"option_id": "a", "label": "A", "score": 0.5, "reason": "r"}],
+             "selected": "a", "reason": "r"} for i, c in enumerate(cats)]}
+        validate_artifact("decision_log", log)
+
+    def test_every_gated_stage_also_requires_a_checkpoint(self):
+        import yaml
+
+        m = yaml.safe_load((Path(__file__).resolve().parents[2] / "pipeline_defs" / "topic-tutorial.yaml").read_text())
+        for st in m["stages"]:
+            if st.get("human_approval_default"):
+                assert st.get("checkpoint_required") is True, f"gate stage {st['name']} must have checkpoint_required: true"

@@ -234,16 +234,9 @@ class UniversalIngestor(BaseTool):
                     add({"source_id": next_id(), "file_path": str(root), "filename": root.name, "status": "unsupported",
                          "error": "Repo path is not a directory", "sha256": None, "word_count": 0, "byte_size": 0, "content": ""}, "repo")
                     continue
-                files = self._collect_directory_files(root, max_files)
                 focus = [str(f).strip("/") for f in (repo.get("focus") or [])]
-                if focus:
-                    files = [
-                        f for f in files
-                        if any(
-                            (rel := f.relative_to(root).as_posix()) == fo or rel.startswith(fo + "/")
-                            for fo in focus
-                        )
-                    ]
+                # focus is applied while walking, so max_files counts focused files (not the first N of the whole repo)
+                files = self._collect_directory_files(root, max_files, focus=focus or None)
                 for fpath in files:
                     add(self._ingest_file(fpath, next_id(), max_file_size_bytes, allowed_root=root), "repo")
             for url in spec.get("urls") or []:
@@ -343,7 +336,7 @@ class UniversalIngestor(BaseTool):
             cost_usd=0.0,
         )
 
-    def _collect_directory_files(self, root_dir: Path, max_files: int) -> list[Path]:
+    def _collect_directory_files(self, root_dir: Path, max_files: int, focus: Optional[list[str]] = None) -> list[Path]:
         collected: list[Path] = []
         root_resolved = root_dir.resolve()
         git_ignore_patterns = [
@@ -370,25 +363,46 @@ class UniversalIngestor(BaseTool):
                 with open(gitignore_file, "r", encoding="utf-8", errors="ignore") as f:
                     for line in f:
                         line = line.strip()
-                        if line and not line.startswith("#"):
-                            git_ignore_patterns.append(line)
+                        if line and not line.startswith(("#", "!")):
+                            # ".gitignore" directory entries end with "/" (and may start with "/"); fnmatch needs the bare name
+                            git_ignore_patterns.append(line.strip("/") or line)
             except Exception:
                 pass
 
-        for root, dirs, files in os.walk(root_dir):
-            rel_root = Path(root).relative_to(root_dir)
-            dirs[:] = [
-                d for d in dirs
-                if not any(fnmatch.fnmatch(str(rel_root / d), pat) or fnmatch.fnmatch(d, pat) for pat in git_ignore_patterns)
-            ]
-            for file in sorted(files):
-                full_path = Path(root) / file
-                rel_path = rel_root / file
-                if any(fnmatch.fnmatch(str(rel_path), pat) or fnmatch.fnmatch(file, pat) for pat in git_ignore_patterns):
-                    continue
-                collected.append(full_path)
-                if len(collected) >= max_files:
-                    return collected
+        def _ignored(rel: Path, name: str) -> bool:
+            return any(fnmatch.fnmatch(str(rel), pat) or fnmatch.fnmatch(name, pat) for pat in git_ignore_patterns)
+
+        # With a focus list, walk only those files/dirs (still under root, still honouring ignore patterns).
+        starts: list[Path] = [root_dir]
+        if focus:
+            starts = []
+            for fo in focus:
+                cand = (root_dir / fo).resolve()
+                if cand != root_resolved and root_resolved not in cand.parents:
+                    continue  # focus entry escapes the repo root
+                if cand.exists():
+                    starts.append(cand)
+            if not starts:
+                return collected
+
+        for start in starts:
+            if start.is_file():
+                if not _ignored(start.relative_to(root_resolved), start.name):
+                    collected.append(start)
+                    if len(collected) >= max_files:
+                        return collected
+                continue
+            for root, dirs, files in os.walk(start):
+                rel_root = Path(root).resolve().relative_to(root_resolved)
+                dirs.sort()
+                dirs[:] = [d for d in dirs if not _ignored(rel_root / d, d)]
+                for file in sorted(files):
+                    rel_path = rel_root / file
+                    if _ignored(rel_path, file):
+                        continue
+                    collected.append(Path(root) / file)
+                    if len(collected) >= max_files:
+                        return collected
         return collected
 
     def _ingest_file(
@@ -645,14 +659,32 @@ class UniversalIngestor(BaseTool):
             import requests
             from bs4 import BeautifulSoup
 
+            # Follow up to 5 redirects manually so every hop is SSRF-validated (requests would follow blindly).
+            final_url = url
+            resp = None
+            for _hop in range(6):
+                resp = requests.get(
+                    final_url,
+                    timeout=15,
+                    headers={"User-Agent": "OpenMontage-UniversalIngestor/1.1"},
+                    stream=True,
+                    allow_redirects=False,
+                )
+                if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("Location"):
+                    nxt = urllib.parse.urljoin(final_url, resp.headers["Location"])
+                    resp.close()
+                    hop_err = _validate_public_url(nxt)
+                    if hop_err:
+                        return {
+                            "source_id": source_id, "file_path": url, "filename": url, "file_type": "url",
+                            "status": "unsupported", "error": f"redirect to {nxt} refused: {hop_err}",
+                            "sha256": sha256_hash, "word_count": 0, "byte_size": 0, "content": "",
+                        }
+                    final_url = nxt
+                    continue
+                break
             # Stream response and cap at 5MB
-            with requests.get(
-                url,
-                timeout=15,
-                headers={"User-Agent": "OpenMontage-UniversalIngestor/1.1"},
-                stream=True,
-                allow_redirects=False,
-            ) as resp:
+            with resp:
                 if resp.status_code != 200:
                     return {
                         "source_id": source_id,

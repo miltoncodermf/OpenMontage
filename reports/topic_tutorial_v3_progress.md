@@ -262,3 +262,16 @@ Owner answer: drop LatentSync; MuseTalk-MLX handles the full-screen route. Done:
 - `rm -rf ~/Models/latentsync` — 6.4 GB (checkpoints 5.2 GB, mlx/ + upstream/ clones, venv; the venv's `bin/python*` were symlinks into Homebrew Python, so only the links were removed). `ls ~/Models` afterwards: birefnet, chatterbox, hf, liveportrait, mediapipe, musetalk, u2net.
 - `lib/twin_backends.latentsync_available()` now always returns unavailable with the deferral reason; `reports/twin_bakeoff_dev.md` (+ `scripts/twin_bakeoff_dev.py` text) and B4 above say "deferred", `presenter-director.md` no longer recommends it.
 - `sb1992/latentsync-mlx` was never executed. `pytest tests/contracts/test_topic_tutorial_fast.py` → 137 passed.
+
+## Fix round 1 — Group E (no-presenter validation run, project `topic-tutorial-validation`)
+
+Owner input (via parent session, 2026-11-14): this repo (`pipeline_defs/topic-tutorial.yaml` + `skills/pipelines/topic-tutorial/`) + `https://www.remotion.dev/docs/the-fundamentals` + a topic line. Presenter policy `none` (`presenter_status: skipped_unavailable`, "presenter profile not yet created"). Paid calls: none (`ALLOW_PAID_APIS=false`).
+
+Defects found so far and fixed (with tests in `TestFixRound1GroupEIngestion` / `TestFixRound1GroupEDecisionLog`):
+- `universal_ingestor`: repo `focus` was applied after the 100-file cap, so a focused repo ingested 0 files → focus now applied while walking (and cannot escape the repo root); `.gitignore` directory entries ending in `/` (e.g. `projects/`) were ignored → fixed; URL fetch refused every redirect (`HTTP 308` on the Remotion docs URL) → follows ≤ 5 redirects, SSRF-validating each hop. Result: 13/13 sources ingested.
+- `decision_log` schema enum lacked the categories the topic-tutorial skills mandate (`model_routing`, `presenter_engine`, `presenter_wardrobe`, `voice_profile`, `music`, `playbook`, `capture_plan`, `alignment_method`) → added.
+- Manifest: the `assets` stage was a gate (`human_approval_default: true`) with `checkpoint_required: false` → set to `true`; test asserts every gated stage requires a checkpoint.
+- `asset-director.md` sent diagrams to `diagram_gen`, whose output cannot meet the legibility floor on this machine → now points to spec-driven `diagram` cuts.
+- Noted, not changed: `proposal_packet.schema` requires ≥ 3 concepts while skill/manifest say "2–3"/"at least 2"; `mlx_tts` defaults to `allow_fallback=true` (to an unavailable piper); `skipped_unavailable` is a free string.
+
+Stages: research (deep sub-agent, 18 data points, 4 angles, 2 media candidates; `brief_problems` = []) → completed. Proposal (deep sub-agent) → `awaiting_human` at gate 1.

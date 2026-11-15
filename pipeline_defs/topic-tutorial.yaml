@@ -178,7 +178,7 @@ stages:
       - twin_lipsync
       - presenter_matte
       - threejs_world
-    checkpoint_required: false
+    checkpoint_required: true
     human_approval_default: true
     review_focus:
       - Narration audio generated with clean speech and dynamic sample rate
