@@ -27,16 +27,9 @@ def musetalk_mlx_available() -> tuple[bool, str]:
 
 
 def latentsync_available() -> tuple[bool, str]:
-    """LatentSync (Apache-2.0 code, OpenRAIL++ weights) via the MLX port. NOT integrated: see reports/twin_bakeoff_dev.md."""
-    d = os.environ.get("LATENTSYNC_DIR")
-    if not d:
-        from lib.model_store import model_path
-
-        d = str(model_path("latentsync"))
-    if not (Path(d) / "checkpoints" / "latentsync_unet_mlx.safetensors").is_file():
-        return False, (f"no converted MLX weights in {d}/checkpoints (weights downloaded: latentsync_unet.pt 5 GB + whisper/tiny.pt; "
-                       "conversion/inference needs the third-party sb1992/latentsync-mlx code run in its own venv — blocked pending the owner's OK, see reports/twin_bakeoff_dev.md)")
-    return False, "converted weights present but the MediaPipe-based LatentSync face pre/post-processing worker is not integrated yet"
+    """LatentSync is DEFERRED by owner decision (see reports/twin_bakeoff_dev.md "LatentSync (B4)"). Never available."""
+    return False, ("LatentSync is deferred: the owner chose not to run the unvetted MLX port (sb1992/latentsync-mlx) and its weights were removed "
+                   "from the model store. MuseTalk-MLX handles the full-screen route. Revisit only on a new owner decision.")
 
 
 def liveportrait_available() -> tuple[bool, str]:

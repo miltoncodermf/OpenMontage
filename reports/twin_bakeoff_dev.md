@@ -52,13 +52,13 @@ Mouth-sync note: the lip-gap vs audio-envelope proxy is weak (it did not track i
 - **PIP vs diagram content**: with no `focus_region` on the diagram beat the bottom-right PIP overlapped the "GPU" node in both PIP renders. The layout engine can only avoid *declared* focus regions, so the scene director must set `focus_region` on every diagram beat that has a PIP (follow-up for the scene-director skill / a scene-plan validator).
 - **Sharpness proxy** (single frame, lower face): the hybrid clip scored higher than the LivePortrait clip — plausible, because LivePortrait adds a second generation pass before MuseTalk's 256² crop; one frame on a fictional face is not a verdict.
 - **Mouth sync is not measured by an automatic check here** (see note above) — compare the clips by eye/ear.
-- **LatentSync was not run**: see `## LatentSync (B4)`.
+- **LatentSync deferred (owner decision)**: see `## LatentSync (B4)`.
 - **Cost**: the hybrid route's only paid step is the one-time idle loop per outfit ($1.02 actual here, 47 s); everything else is local. The local route needs the owner's performance recording as the driving clip (here: the Omni idle clip, licence recorded as own generation).
 - **Time per ~23 s of presenter video** (stages above): hybrid ≈ lipsync 301 s + matte 329 s; local ≈ LivePortrait 375 s (for a 10 s driving clip; scales with its length) + lipsync 237 s + matte 350 s. MLX lipsync peak footprint ≈ 20 GB (RSS 5.3 GB) — run alone under the heavy lock.
 
 ## LatentSync (B4)
 
-**Not run — stopped at a 🛑, not a technical failure.** Weights are downloaded (`ByteDance/LatentSync-1.6`: `latentsync_unet.pt` 5 GB + `whisper/tiny.pt`, OpenRAIL++ weights / Apache-2.0 code, in the model store; the 9.6 GB repo's training/eval extras were not fetched). The only Apple-silicon route found is the MLX port `sb1992/latentsync-mlx` (Apache-2.0, 6 stars, single author), which still needs the upstream LatentSync pre-processing (decord, InsightFace detector — which must be replaced by MediaPipe, an extra integration step) and whisper in PyTorch. Converting the UNet and running that code means executing an unvetted third-party repository, and the sandbox's auto-mode classifier denied each attempt (`convert_weights.py`, even with `python -I` from outside the repo and `weights_only=True` loading). I did not work around it. **Needs the owner's explicit OK to run `sb1992/latentsync-mlx` (pinned to commit 8370f1f) in `<model store>/latentsync/venv`**, or a decision to drop LatentSync.
+**Deferred by owner decision — not run, not a technical failure.** The only Apple-silicon route found was the third-party MLX port `sb1992/latentsync-mlx` (unvetted, single author). The owner chose to drop LatentSync for now; the downloaded weights (~6.4 GB with venv) were deleted from the model store. MuseTalk-MLX handles the full-screen route. `twin_backends.latentsync_available()` reports the deferral.
 
 ## Contact sheet
 

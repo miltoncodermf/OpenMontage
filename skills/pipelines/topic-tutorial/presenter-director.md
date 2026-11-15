@@ -12,7 +12,7 @@
 3. **Motion source** (engine from the owner's bake-off default, announced at proposal; both stay supported):
    - **Hybrid:** if `loops/<variant>/idle.mp4` is missing, generate an 8–10 s idle loop (breathing, blinks, slight head motion, mouth closed) via `gemini_omni_video` (or `veo_video` with first=last frame if available). Paid call → must be itemized; announce first. API failure → ask the owner before using the Google Flow browser fallback (D8).
    - **Local:** LivePortrait retargets `raw/performance.mov` motion onto the variant image → `performance/<variant>.mp4` (overnight OK; run alone).
-4. **Lip-sync** each presenter segment to its narration WAV with `twin_lipsync` (MuseTalk-MLX; LatentSync for full-screen if mouths look soft), looping/ping-ponging the motion source to length. Per-segment outputs so a long run resumes.
+4. **Lip-sync** each presenter segment to its narration WAV with `twin_lipsync` (MuseTalk-MLX, including the full-screen route; LatentSync is deferred by owner decision and unavailable), looping/ping-ponging the motion source to length. Per-segment outputs so a long run resumes.
 5. **Matte:** `presenter_matte` → alpha version (ProRes 4444 or VP9 alpha). The presenter is always a **separate alpha layer**, never baked into a plate.
 6. **QA:** face present in ≥ 98 % of frames; mouth–audio offset within ±2 frames; no frame perceptually identical to `raw/` frames; `identity_transform == "beautified"`.
 7. **Failure → no presenter:** re-plan presenter beats into visual beats, log `presenter_status: "skipped_failed"` with reason, surface at the assets gate.
