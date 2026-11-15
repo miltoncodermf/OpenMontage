@@ -27,24 +27,38 @@ def is_test_mode() -> bool:
     return os.environ.get(TEST_MODE_ENV, "").strip().lower() in {"1", "true", "yes"}
 
 
-def _iter_strings(obj: Any) -> Iterable[str]:
+# Only values stored under path-like keys are asset references. Free text (on-screen labels, subtitles, reasons,
+# notes) may legitimately *talk about* test fixtures — e.g. a diagram explaining this very guard — and must not
+# make the final review fail.
+_PATH_KEY_EXACT = {"source", "src", "path", "file", "url", "uri", "video", "image", "audio", "poster",
+                   "backgroundimage", "background_image", "presentervideo", "presenter_video", "thumbnail"}
+_PATH_KEY_SUFFIXES = ("_path", "path", "_file", "_src", "_url", "_uri", "_video", "_image", "_audio")
+
+
+def _is_path_key(key: Any) -> bool:
+    k = str(key).lower()
+    return k in _PATH_KEY_EXACT or k.endswith(_PATH_KEY_SUFFIXES)
+
+
+def _iter_path_strings(obj: Any, in_path_key: bool = False) -> Iterable[str]:
     if isinstance(obj, str):
-        yield obj
+        if in_path_key:
+            yield obj
     elif isinstance(obj, dict):
-        for v in obj.values():
-            yield from _iter_strings(v)
+        for k, v in obj.items():
+            yield from _iter_path_strings(v, _is_path_key(k))
     elif isinstance(obj, (list, tuple)):
         for v in obj:
-            yield from _iter_strings(v)
+            yield from _iter_path_strings(v, in_path_key)
 
 
 def find_test_only_assets(*artifacts: Any) -> list[str]:
-    """Return every string value in the artifacts that references a test-only asset."""
+    """Return every asset reference (value under a path-like key) that points at a test-only asset."""
     found: list[str] = []
     for art in artifacts:
         if art is None:
             continue
-        for s in _iter_strings(art):
+        for s in _iter_path_strings(art):
             if len(s) < 4096 and is_test_only_path(s) and s not in found:
                 found.append(s)
     return found

@@ -2661,3 +2661,19 @@ class TestFixRound1GroupEDecisionLog:
         for st in m["stages"]:
             if st.get("human_approval_default"):
                 assert st.get("checkpoint_required") is True, f"gate stage {st['name']} must have checkpoint_required: true"
+
+
+class TestFixRound1GroupEHonestyScope:
+    def test_labels_that_mention_test_files_do_not_trip_the_guard(self):
+        from lib.honesty_guard import find_test_only_assets
+
+        ed = {"metadata": {"diagram_cuts": [{"diagramSpec": {"title": "Guard", "nodes": [{"label": "TEST_ONLY_intro.png"},
+              {"label": "tests/fixtures/clip.mp4"}]}}]}, "cuts": [{"reason": "shows that tests/fixtures files fail review"}]}
+        assert find_test_only_assets(ed) == []
+
+    def test_real_asset_references_still_trip_it(self):
+        from lib.honesty_guard import find_test_only_assets
+
+        ed = {"cuts": [{"source": "projects/x/assets/TEST_ONLY_intro.png"}, {"backgroundImage": "tests/fixtures/a.jpg"}],
+              "assets": [{"path": "a/TEST_ONLY_b.wav"}], "x": {"video_path": "tests/fixtures/v.mp4"}, "list": {"source": ["tests/fixtures/q.png"]}}
+        assert len(find_test_only_assets(ed)) == 5
