@@ -2,9 +2,9 @@
 # A playbook is `verified: true` only after the owner approved a real end-to-end run in it at the
 # compose gate. Others stay selectable but are labelled unverified in the proposal.
 software-technical:
-  verified: false          # flip to true after the owner approves the no-presenter validation run (fix round, Group E)
-  verified_by_run: null
-  verified_on: null
+  verified: true           # flipped after the owner approved the no-presenter validation run at the compose gate (fix round, Group E)
+  verified_by_run: topic-tutorial-validation
+  verified_on: "2026-11-15"
 ai-news-explainer:
   verified: false
 finance-data:
