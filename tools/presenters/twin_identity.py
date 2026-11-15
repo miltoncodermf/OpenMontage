@@ -99,6 +99,7 @@ class TwinIdentity(BaseTool):
             "tags": {"type": "array", "items": {"type": "string"}},
             "hair": {"type": "string"},
             "candidate": {"type": "string"},
+            "ref_stills": {"type": "array", "items": {"type": "string"}, "description": "beautify: still file names to use as references (default: the first four); pick frontal, eyes-to-camera frames"},
             "tweaks": {"type": "string"},
         },
     }
@@ -154,9 +155,12 @@ class TwinIdentity(BaseTool):
 
     # ---- extract_stills -------------------------------------------------
     def _extract_stills(self, d: Path, count: int) -> ToolResult:
-        raw = next(iter(sorted((d / "raw").glob("face_turn.*"))), None)
+        raw = pp.working_video(d, "face_turn", raw_fallback=True)
         if raw is None:
-            return ToolResult(success=False, error="raw/face_turn.* not found — run capture_session first")
+            has_raw = any((d / "raw").glob("face_turn.*"))
+            return ToolResult(success=False, error=(
+                "raw/face_turn.* is HDR or rotated (phone original) and has no SDR working copy — run presenter_profile normalize_raw first"
+                if has_raw else "raw/face_turn.* not found — run capture_session first"))
         refs = d / "identity" / "refs"
         tmp = refs / "_all"
         shutil.rmtree(tmp, ignore_errors=True)
@@ -204,11 +208,27 @@ class TwinIdentity(BaseTool):
             out.chmod(0o600)
         return res
 
+    def _consent_problem(self, pid: str) -> str | None:
+        """Sending the owner's likeness to a cloud model needs recorded consent (stand-ins are fictional)."""
+        if pp.read_profile(pid).get("standin"):
+            return None
+        try:
+            pp.require_consent(pid)
+        except pp.ProfileError as exc:
+            return str(exc)
+        return None
+
     def _beautify(self, d: Path, pid: str, inputs: dict[str, Any]) -> ToolResult:
-        blocked = self._guard_paid(inputs)
+        blocked = self._guard_paid(inputs) or self._consent_problem(pid)
         if blocked:
             return ToolResult(success=False, error=blocked)
         refs = sorted((d / "identity" / "refs").glob("still_*.png"))
+        if inputs.get("ref_stills"):
+            chosen = [d / "identity" / "refs" / Path(n).name for n in inputs["ref_stills"]]
+            missing = [c.name for c in chosen if not c.is_file()]
+            if missing:
+                return ToolResult(success=False, error=f"ref_stills not found: {missing}")
+            refs = chosen
         if not refs:
             return ToolResult(success=False, error="no reference stills — run extract_stills first")
         cdir = d / "identity" / "candidates"
@@ -229,7 +249,7 @@ class TwinIdentity(BaseTool):
                           error=None if made else "; ".join(map(str, errors)))
 
     def _wardrobe(self, d: Path, pid: str, inputs: dict[str, Any]) -> ToolResult:
-        blocked = self._guard_paid(inputs)
+        blocked = self._guard_paid(inputs) or self._consent_problem(pid)
         if blocked:
             return ToolResult(success=False, error=blocked)
         canonical = d / "identity" / "canonical.png"

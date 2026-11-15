@@ -1533,7 +1533,10 @@ class TestV3TwinIdentityGuards:
         from tools.base_tool import ToolResult
         from tools.presenters.twin_identity import TwinIdentity
 
+        from lib import presenter_profile as pp
+
         d = self._setup(profile_root)
+        pp.record_consent("owner", likeness_consent=True, statement="test owner consent")
         (d / "identity" / "refs" / "still_01.png").write_bytes(b"x")
         monkeypatch.setenv("ALLOW_PAID_APIS", "true")
         calls = []
@@ -2821,3 +2824,168 @@ class TestFixRound1GroupEComposePath:
     def test_without_composition_data_edit_decisions_cuts_are_used(self, tmp_path, monkeypatch):
         res, seen, _ = self._run(tmp_path, monkeypatch)
         assert res.success and seen["props"]["cuts"][0]["source"] == "/x/a.png"
+
+
+# --------------------------------------------------------------------------------------------
+# Real-profile onboarding: HDR/rotation working copies, adopting a hand-made folder, consent
+# --------------------------------------------------------------------------------------------
+def _hlg_rotated_clip(path: Path, rotation: int = 180) -> Path:
+    """320x180 HEVC HLG 10-bit clip with a white square top-left and a display-matrix rotation flag
+    (what an iPhone writes): the pixels are NOT rotated, only the flag says how to show them."""
+    import subprocess
+
+    base = path.with_name("_base.mp4")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                    "color=c=gray:s=320x180:d=1:r=10,drawbox=x=0:y=0:w=80:h=45:color=white:t=fill",
+                    "-vf", "format=yuv420p10le", "-c:v", "libx265",
+                    "-x265-params", "log-level=error:colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
+                    str(base)], check=True)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-display_rotation", str(rotation), "-i", str(base),
+                    "-c", "copy", str(path)], check=True)
+    base.unlink()
+    return path
+
+
+def _luma(path: Path, x: int, y: int) -> int:
+    import subprocess
+
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-frames:v", "1", "-vf", f"crop=4:4:{x}:{y},format=gray",
+                          "-f", "rawvideo", "-"], capture_output=True, check=True).stdout
+    return raw[0]
+
+
+class TestRealProfileOnboarding:
+    def test_normalize_bakes_rotation_and_tonemaps_hdr(self, tmp_path):
+        from lib.recording_normalize import needs_normalizing, normalize_video, video_info
+
+        src = _hlg_rotated_clip(tmp_path / "phone.mov", 180)
+        info = video_info(src)
+        assert info["hdr"] and info["rotation"] == 180 and info["bit_depth"] == 10 and needs_normalizing(src)
+        before = src.read_bytes()
+        rep = normalize_video(src, tmp_path / "work.mp4")
+        after = video_info(tmp_path / "work.mp4")
+        assert src.read_bytes() == before  # raw untouched
+        assert (after["codec"], after["pix_fmt"], after["rotation"]) == ("h264", "yuv420p", 0)
+        assert (after["color_transfer"], after["color_primaries"], after["color_space"]) == ("bt709",) * 3
+        assert rep["rotation_baked"] == 180 and rep["tonemapped"] is True and not needs_normalizing(tmp_path / "work.mp4")
+        # the white square sat top-left in the stored pixels; displayed upright it belongs bottom-right
+        assert _luma(tmp_path / "work.mp4", 316, 176) > 200 and _luma(tmp_path / "work.mp4", 0, 0) < 160
+
+    def test_quarter_turn_swaps_dimensions(self, tmp_path):
+        from lib.recording_normalize import normalize_video
+
+        src = _hlg_rotated_clip(tmp_path / "phone90.mov", 90)
+        rep = normalize_video(src, tmp_path / "w90.mp4")
+        assert (rep["after"]["width"], rep["after"]["height"]) == (180, 320)
+
+    def test_sdr_upright_video_needs_nothing(self, tmp_path):
+        from lib.recording_normalize import needs_normalizing
+
+        assert needs_normalizing(_tiny_clip(tmp_path / "sdr.mp4", audio=False)) is False
+
+    def test_adopt_handmade_folder_keeps_raw_and_fixes_permissions(self, profile_root):
+        import hashlib
+        import os
+        import stat
+
+        from lib import presenter_profile as pp
+
+        d = profile_root / "ming"
+        (d / "raw").mkdir(parents=True)
+        f = d / "raw" / "voice_read.m4a"
+        f.write_bytes(b"owner audio bytes")
+        (d / ".DS_Store").write_bytes(b"junk")
+        os.chmod(d, 0o755), os.chmod(d / "raw", 0o755), os.chmod(f, 0o644)
+        digest = hashlib.sha256(b"owner audio bytes").hexdigest()
+        rep = pp.adopt_profile("ming", "Ming")
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700 and stat.S_IMODE(f.stat().st_mode) == 0o600
+        assert not (d / ".DS_Store").exists() and rep["permissions_changed"]
+        assert pp.sha256_file(f) == digest and f.read_bytes() == b"owner audio bytes"
+        prof = pp.read_profile("ming")
+        assert prof["locked"] is False and "owner_consent" not in prof  # consent is never assumed
+        assert pp.verify_profile("ming", require_locked=False) == []
+        with pytest.raises(pp.ProfileError, match="already"):
+            pp.adopt_profile("ming")
+
+    def test_register_raw_in_place_validates_and_hashes_without_moving(self, profile_root):
+        from lib import presenter_profile as pp
+
+        d = profile_root / "ming"
+        (d / "raw").mkdir(parents=True)
+        short = _tiny_clip(d / "raw" / "face_turn.MOV")
+        pp.adopt_profile("ming")
+        with pytest.raises(pp.ProfileError, match="validation"):
+            pp.register_raw_in_place("ming", "face_turn", "face_turn.MOV")  # 320x240, 1 s: fails the validator
+        assert short.is_file() and "raw" not in pp.read_profile("ming")
+
+    def test_normalize_raw_registers_working_copy_and_leaves_raw_identical(self, profile_root):
+        from lib import presenter_profile as pp
+
+        d = profile_root / "ming"
+        (d / "raw").mkdir(parents=True)
+        raw = _hlg_rotated_clip(d / "raw" / "face_turn.MOV")
+        pp.adopt_profile("ming")
+        digest = pp.sha256_file(raw)
+        prof = pp.read_profile("ming")
+        prof["raw"] = {"face_turn": {"file": "raw/face_turn.MOV", "sha256": digest}}
+        pp.write_profile(d, prof)
+        assert pp.working_video(d, "face_turn", raw_fallback=True) is None  # HDR+rotated raw is not usable as is
+        work = pp.normalize_raw("ming", "face_turn")
+        assert pp.sha256_file(raw) == digest
+        assert work["file"] == "raw/working/face_turn.sdr.mp4" and work["normalization"]["rotation_baked"] == 180
+        assert pp.working_video(d, "face_turn") == d / "raw" / "working" / "face_turn.sdr.mp4"
+        assert pp.is_inside_profile_raw(d / work["file"])  # working copies are raw footage: never rendered
+        assert pp.read_profile("ming")["raw"]["face_turn"]["working"]["sha256"] == pp.sha256_file(d / work["file"])
+        assert pp.verify_profile("ming", require_locked=False) == []
+
+    def test_normalize_raw_refuses_when_raw_changed_since_registration(self, profile_root):
+        from lib import presenter_profile as pp
+
+        d = profile_root / "ming"
+        (d / "raw").mkdir(parents=True)
+        raw = _hlg_rotated_clip(d / "raw" / "face_turn.MOV")
+        pp.adopt_profile("ming")
+        prof = pp.read_profile("ming")
+        prof["raw"] = {"face_turn": {"file": "raw/face_turn.MOV", "sha256": "0" * 64}}
+        pp.write_profile(d, prof)
+        with pytest.raises(pp.ProfileError, match="sha256 mismatch"):
+            pp.normalize_raw("ming", "face_turn")
+        assert raw.is_file() and not (d / "raw" / "working").exists()
+
+    def test_extract_stills_refuses_hdr_original_without_working_copy(self, profile_root):
+        from tools.presenters.twin_identity import TwinIdentity
+        from lib import presenter_profile as pp
+
+        d = profile_root / "ming"
+        (d / "raw").mkdir(parents=True)
+        _hlg_rotated_clip(d / "raw" / "face_turn.MOV")
+        pp.adopt_profile("ming")
+        res = TwinIdentity().execute({"operation": "extract_stills", "profile_id": "ming"})
+        assert not res.success and "normalize_raw" in res.error
+
+    def test_consent_is_required_before_likeness_leaves_the_machine(self, profile_root, monkeypatch):
+        from lib import presenter_profile as pp
+        from tools.presenters.twin_identity import TwinIdentity
+
+        monkeypatch.setenv("ALLOW_PAID_APIS", "true")
+        pp.create_profile("ming")
+        called = []
+        tool = TwinIdentity()
+        monkeypatch.setattr(tool, "_imagen", lambda: called.append(1))
+        res = tool.execute({"operation": "beautify", "profile_id": "ming", "paid_call_approved": True})
+        assert not res.success and "consent" in res.error and not called
+        with pytest.raises(pp.ProfileError):
+            pp.record_consent("ming", likeness_consent=False, statement="x")
+        pp.record_consent("ming", likeness_consent=True, statement="Owner agreed in chat")
+        assert pp.read_profile("ming")["owner_consent"]["likeness_consent"] is True
+        res = tool.execute({"operation": "beautify", "profile_id": "ming", "paid_call_approved": True})
+        assert "consent" not in (res.error or "")  # now stops later, at "no reference stills"
+
+    def test_standin_profiles_need_no_consent(self, profile_root, monkeypatch):
+        from lib import presenter_profile as pp
+        from tools.presenters.twin_identity import TwinIdentity
+
+        monkeypatch.setenv("ALLOW_PAID_APIS", "true")
+        pp.create_profile("fake", standin=True)
+        res = TwinIdentity().execute({"operation": "beautify", "profile_id": "fake", "paid_call_approved": True})
+        assert "consent" not in (res.error or "")

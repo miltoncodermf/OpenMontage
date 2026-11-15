@@ -70,6 +70,43 @@ def create_profile(profile_id: str, display_name: str = "", standin: bool = Fals
     return d
 
 
+def fix_permissions(d: Path) -> list[str]:
+    """chmod the profile tree to 700 (dirs) / 600 (files); returns what changed. Finder junk is deleted."""
+    changed: list[str] = []
+    for junk in list(d.rglob(".DS_Store")):
+        junk.unlink()
+        changed.append(f"removed {junk.relative_to(d).as_posix()}")
+    for p in [d, *sorted(d.rglob("*"))]:
+        if p.is_symlink():
+            continue
+        want = 0o700 if p.is_dir() else 0o600
+        have = stat.S_IMODE(p.stat().st_mode)
+        if have != want:
+            os.chmod(p, want)
+            changed.append(f"{p.relative_to(d).as_posix() or '.'}: {oct(have)} -> {oct(want)}")
+    return changed
+
+
+def adopt_profile(profile_id: str, display_name: str = "") -> dict[str, Any]:
+    """Initialise a profile around a folder the owner created by hand, keeping whatever is in ``raw/``.
+
+    Creates the missing subdirectories and the unlocked profile.json skeleton, fixes permissions to 700/600.
+    No consent is recorded here: ``record_consent`` does that only after the owner says yes.
+    """
+    d = profile_dir(profile_id)
+    if (d / "profile.json").exists():
+        raise ProfileError(f"profile {profile_id!r} already has a profile.json")
+    if not d.is_dir():
+        raise ProfileError(f"{d} does not exist; use create_profile for a new profile")
+    for sub in SUBDIRS:
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    skeleton = {"version": "1.0", "profile_id": profile_id, "display_name": display_name,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "locked": False, "files": {}}
+    write_profile(d, skeleton)
+    changed = fix_permissions(d)
+    return {"profile_dir": str(d), "permissions_changed": changed}
+
+
 def read_profile(profile_id: str) -> dict[str, Any]:
     f = profile_dir(profile_id) / "profile.json"
     if not f.is_file():
@@ -87,7 +124,7 @@ def write_profile(d: Path, data: dict[str, Any]) -> None:
 def file_hashes(d: Path) -> dict[str, str]:
     out = {}
     for p in sorted(d.rglob("*")):
-        if p.is_file() and p.name != "profile.json" and not p.is_symlink():
+        if p.is_file() and p.name not in ("profile.json", ".DS_Store") and not p.is_symlink():
             out[p.relative_to(d).as_posix()] = sha256_file(p)
     return out
 
@@ -135,6 +172,88 @@ def verify_profile(profile_id: str, require_locked: bool = True) -> list[str]:
             if rel not in prof["files"]:
                 problems.append(f"unrecorded file {rel}")
     return problems
+
+
+def register_raw_in_place(profile_id: str, kind: str, filename: str) -> dict[str, Any]:
+    """Register a recording that already sits in ``raw/`` (validated, sha256 + probe stored; file untouched)."""
+    from lib.recording_validation import validate_recording
+
+    d = profile_dir(profile_id)
+    prof = read_profile(profile_id)
+    if prof.get("locked"):
+        raise ProfileError("profile is locked; raw recordings cannot change")
+    f = (d / "raw" / filename).resolve()
+    if f.parent != (d / "raw").resolve() or not f.is_file():
+        raise ProfileError(f"raw/{filename} not found")
+    check = validate_recording(kind, f)
+    if not check["ok"]:
+        raise ProfileError("recording failed validation: " + "; ".join(check["problems"]))
+    os.chmod(f, 0o600)
+    prof.setdefault("raw", {})[kind] = {"file": f"raw/{f.name}", "sha256": sha256_file(f), "probe": check["probe"]}
+    write_profile(d, prof)
+    return prof["raw"][kind]
+
+
+def normalize_raw(profile_id: str, kind: str) -> dict[str, Any]:
+    """Make the SDR/upright working copy of a raw video and register it; the raw file stays byte-identical."""
+    from lib.recording_normalize import WORKING_DIRNAME, normalize_video
+
+    d = profile_dir(profile_id)
+    prof = read_profile(profile_id)
+    if prof.get("locked"):
+        raise ProfileError("profile is locked; working copies cannot change")
+    entry = (prof.get("raw") or {}).get(kind)
+    if not entry:
+        raise ProfileError(f"raw {kind} is not registered")
+    src = d / entry["file"]
+    if sha256_file(src) != entry["sha256"]:
+        raise ProfileError(f"raw {kind} changed since registration (sha256 mismatch); refusing to continue")
+    dst = d / "raw" / WORKING_DIRNAME / f"{kind}.sdr.mp4"
+    report = normalize_video(src, dst)
+    if sha256_file(src) != entry["sha256"]:  # belt and braces: the source must be untouched
+        raise ProfileError(f"raw {kind} was modified during normalisation")
+    os.chmod(dst.parent, 0o700)
+    os.chmod(dst, 0o600)
+    entry["working"] = {"file": dst.relative_to(d).as_posix(), "sha256": sha256_file(dst),
+                        "normalization": {k: report[k] for k in ("filter", "rotation_baked", "tonemapped", "before", "after")}}
+    write_profile(d, prof)
+    return entry["working"]
+
+
+def working_video(d: Path, kind: str, *, raw_fallback: bool = False) -> Path | None:
+    """Path of the SDR/upright working copy of a raw video (None when absent).
+
+    Pixel-reading tools (OpenCV, MediaPipe, LivePortrait, MuseTalk) must use this, never the phone original.
+    ``raw_fallback`` returns the raw file only when it needs no normalising (SDR, upright, 8-bit).
+    """
+    from lib.recording_normalize import WORKING_DIRNAME, needs_normalizing
+
+    w = d / "raw" / WORKING_DIRNAME / f"{kind}.sdr.mp4"
+    if w.is_file():
+        return w
+    if raw_fallback:
+        raw = next(iter(sorted((d / "raw").glob(f"{kind}.*"))), None)
+        if raw is not None and not needs_normalizing(raw):
+            return raw
+    return None
+
+
+def record_consent(profile_id: str, *, likeness_consent: bool, statement: str, recorded_on: str | None = None) -> dict[str, Any]:
+    """Store the owner's likeness consent. Only call this with the owner's own yes (never assumed)."""
+    d = profile_dir(profile_id)
+    prof = read_profile(profile_id)
+    if not likeness_consent:
+        raise ProfileError("consent not given; nothing is written")
+    prof["owner_consent"] = {"likeness_consent": True, "recorded_on": recorded_on or time.strftime("%Y-%m-%d"),
+                             "statement": statement}
+    write_profile(d, prof)
+    return prof["owner_consent"]
+
+
+def require_consent(profile_id: str) -> None:
+    c = read_profile(profile_id).get("owner_consent") or {}
+    if not c.get("likeness_consent"):
+        raise ProfileError(f"profile {profile_id!r} has no recorded likeness consent; ask the owner first")
 
 
 def is_inside_profile_raw(path: str | Path) -> bool:

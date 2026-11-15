@@ -7,6 +7,7 @@ presenter assets.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ class PresenterProfileTool(BaseTool):
     agent_skills = ["ffmpeg"]
     install_instructions = "Run the `presenter-onboarding` pipeline once to create and lock a presenter profile."
     capabilities = ["profile_create", "profile_verify", "profile_lock", "recording_validation", "presenter_asset_mint", "raw_guard"]
-    supports = {"operations": ["init", "status", "verify", "lock", "validate_recording", "record_raw", "mint_asset", "check_asset"]}
+    supports = {"operations": ["init", "adopt", "status", "verify", "lock", "validate_recording", "record_raw", "register_raw", "normalize_raw", "fix_permissions", "record_consent", "mint_asset", "check_asset"]}
     best_for = ["loading the locked presenter profile and guarding that only the beautified twin is ever rendered"]
     not_good_for = ["generating anything (use twin_* tools)"]
 
@@ -50,7 +51,10 @@ class PresenterProfileTool(BaseTool):
         "required": ["operation"],
         "properties": {
             "standin": {"type": "boolean", "default": False, "description": "init only: dev-only fictional stand-in profile; its assets can never pass final_review"},
-            "operation": {"type": "string", "enum": ["init", "status", "verify", "lock", "validate_recording", "record_raw", "mint_asset", "check_asset"]},
+            "operation": {"type": "string", "enum": ["init", "adopt", "status", "verify", "lock", "validate_recording", "record_raw", "register_raw", "normalize_raw", "fix_permissions", "record_consent", "mint_asset", "check_asset"]},
+            "filename": {"type": "string", "description": "register_raw: file name already inside raw/"},
+            "statement": {"type": "string", "description": "record_consent: what the owner agreed to"},
+            "likeness_consent": {"type": "boolean", "description": "record_consent: only true when the owner said yes"},
             "profile_id": {"type": "string"},
             "display_name": {"type": "string"},
             "kind": {"type": "string", "enum": ["face_turn", "performance", "voice_read"]},
@@ -77,6 +81,17 @@ class PresenterProfileTool(BaseTool):
             if op == "init":
                 d = pp.create_profile(inputs["profile_id"], inputs.get("display_name", ""), standin=bool(inputs.get("standin", False)))
                 return ToolResult(success=True, data={"profile_dir": str(d)})
+            if op == "adopt":
+                return ToolResult(success=True, data=pp.adopt_profile(inputs["profile_id"], inputs.get("display_name", "")))
+            if op == "register_raw":
+                return ToolResult(success=True, data=pp.register_raw_in_place(inputs["profile_id"], inputs["kind"], inputs["filename"]))
+            if op == "normalize_raw":
+                return ToolResult(success=True, data=pp.normalize_raw(inputs["profile_id"], inputs["kind"]))
+            if op == "fix_permissions":
+                return ToolResult(success=True, data={"changed": pp.fix_permissions(pp.profile_dir(inputs["profile_id"]))})
+            if op == "record_consent":
+                return ToolResult(success=True, data=pp.record_consent(
+                    inputs["profile_id"], likeness_consent=bool(inputs.get("likeness_consent")), statement=inputs.get("statement", "")))
             if op == "status":
                 prof = pp.read_profile(inputs["profile_id"])
                 return ToolResult(success=True, data={"locked": prof["locked"], "profile": prof,
@@ -105,7 +120,7 @@ class PresenterProfileTool(BaseTool):
                 problems = presenter_asset_problems(inputs["asset"])
                 return ToolResult(success=not problems, data={"problems": problems}, error="; ".join(problems) or None)
             return ToolResult(success=False, error=f"unknown operation {op!r}")
-        except (pp.ProfileError, KeyError, ValueError) as exc:
+        except (pp.ProfileError, KeyError, ValueError, OSError, subprocess.SubprocessError) as exc:
             return ToolResult(success=False, error=str(exc))
 
     def _record_raw(self, inputs: dict[str, Any]) -> ToolResult:

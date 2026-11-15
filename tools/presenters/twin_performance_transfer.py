@@ -80,9 +80,9 @@ class TwinPerformanceTransfer(BaseTool):
             if not inside_profile and not inputs.get("driving_license"):
                 return ToolResult(success=False, error="an explicit driving_video outside the profile needs driving_license (provenance/licence)")
         else:
-            driving = next(iter(sorted((d / "raw").glob("performance.*"))), None)
+            driving = pp.working_video(d, "performance", raw_fallback=True)
             if driving is None:
-                return ToolResult(success=False, error="raw/performance.* not found — run capture_session (or pass driving_video)")
+                return ToolResult(success=False, error="no usable performance recording: raw/performance.* is missing, or it is HDR/rotated and has no SDR working copy (run presenter_profile normalize_raw), or pass driving_video")
         ok, why = twin_backends.liveportrait_available()
         if not ok:
             return ToolResult(success=False, error=f"LivePortrait unavailable: {why}")

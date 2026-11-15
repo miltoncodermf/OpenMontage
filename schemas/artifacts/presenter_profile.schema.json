@@ -16,7 +16,7 @@
     "locked_at": { "type": "string" },
     "owner_consent": {
       "type": "object",
-      "properties": { "likeness_consent": { "type": "boolean" }, "recorded_on": { "type": "string" } }
+      "properties": { "likeness_consent": { "type": "boolean" }, "recorded_on": { "type": "string" }, "statement": { "type": "string", "description": "What the owner agreed to, as recorded by the agent." } }
     },
     "raw": {
       "type": "object",
@@ -74,7 +74,17 @@
       "properties": {
         "file": { "type": "string" },
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "probe": { "type": "object" }
+        "probe": { "type": "object" },
+        "working": {
+          "type": "object",
+          "required": ["file", "sha256"],
+          "description": "SDR bt709 8-bit upright H.264 working copy (still raw footage: never rendered). Pixel-reading tools use this, not the phone original.",
+          "properties": {
+            "file": { "type": "string" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "normalization": { "type": "object" }
+          }
+        }
       }
     }
   }
