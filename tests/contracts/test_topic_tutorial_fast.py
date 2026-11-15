@@ -1298,19 +1298,21 @@ class TestV3SandboxToolAndLock:
             name = sys.argv[1]
             with heavy_job(name, Path({str(lock)!r}), wait=30):
                 with open({str(log)!r}, "a") as f: f.write(name + ":start\\n")
-                time.sleep(0.6)
+                time.sleep(2.0)
                 with open({str(log)!r}, "a") as f: f.write(name + ":end\\n")
         """)
         procs = [subprocess.Popen([sys.executable, "-c", worker, n], cwd=str(Path(__file__).resolve().parents[2])) for n in ("a", "b")]
-        # while a worker holds it, a fail-fast acquisition is refused
-        deadline = time.time() + 10
+        # Wait until a worker has really taken the lock (interpreter start-up is slow when the whole suite is running),
+        # then a fail-fast acquisition must be refused while it holds it.
+        deadline = time.time() + 90
+        while time.time() < deadline and not (log.exists() and ":start" in log.read_text()):
+            time.sleep(0.05)
         refused = False
-        while time.time() < deadline and not refused:
-            try:
-                with heavy_job("probe", lock):
-                    time.sleep(0.02)
-            except HeavyJobBusy:
-                refused = True
+        try:
+            with heavy_job("probe", lock):
+                pass
+        except HeavyJobBusy:
+            refused = True
         for p in procs:
             assert p.wait(timeout=30) == 0
         lines = log.read_text().split()
