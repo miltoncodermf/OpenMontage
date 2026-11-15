@@ -37,6 +37,15 @@ from tools.base_tool import (
 DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image"
 
 
+def _ensure_real_png(path: Path) -> None:
+    """Gemini returns JPEG bytes; the tool writes them to the requested ``.png`` name. Re-encode so the extension is true."""
+    with Image.open(path) as im:
+        if im.format == "PNG":
+            return
+        rgb = im.convert("RGB")
+    rgb.save(path, format="PNG")
+
+
 def laplacian_variance(path: Path) -> float:
     """Sharpness score (variance of a 3x3 Laplacian) on a 640px-wide grayscale copy."""
     img = Image.open(path).convert("L")
@@ -99,6 +108,10 @@ class TwinIdentity(BaseTool):
             "tags": {"type": "array", "items": {"type": "string"}},
             "hair": {"type": "string"},
             "candidate": {"type": "string"},
+            "strength": {"type": "string", "enum": ["subtle", "strong", "very_strong"], "default": "subtle"},
+            "start_index": {"type": "integer", "default": 0, "description": "beautify: first candidate number minus one, so rounds do not overwrite each other"},
+            "approved_total_usd": {"type": "number", "description": "Owner-approved total for this paid batch; calls stop at 1.2x (lib/paid_call_guard)"},
+            "spend_ledger": {"type": "string", "description": "JSON file recording every paid call; the guard sums it"},
             "ref_stills": {"type": "array", "items": {"type": "string"}, "description": "beautify: still file names to use as references (default: the first four); pick frontal, eyes-to-camera frames"},
             "tweaks": {"type": "string"},
         },
@@ -205,6 +218,7 @@ class TwinIdentity(BaseTool):
             "aspect_ratio": "16:9",
         })
         if res.success and out.is_file():
+            _ensure_real_png(out)
             out.chmod(0o600)
         return res
 
@@ -217,6 +231,36 @@ class TwinIdentity(BaseTool):
         except pp.ProfileError as exc:
             return str(exc)
         return None
+
+    # ---- budget guard: owner-approved total, hard stop at 1.2x (lib/paid_call_guard) -------------
+    def _ledger(self, inputs: dict[str, Any]) -> tuple[Path | None, list[dict[str, Any]]]:
+        if not inputs.get("spend_ledger"):
+            return None, []
+        p = Path(inputs["spend_ledger"])
+        return p, (json.loads(p.read_text()) if p.is_file() else [])
+
+    def _budget_problem(self, inputs: dict[str, Any], model: str, n: int) -> str | None:
+        from lib.paid_call_guard import OVERRUN_FACTOR
+
+        approved = inputs.get("approved_total_usd")
+        if approved is None:
+            return None
+        _, entries = self._ledger(inputs)
+        spent = sum(float(e.get("usd", 0)) for e in entries)
+        nxt = self.estimate_cost({"operation": "wardrobe", "model": model}) * n
+        if spent + nxt > float(approved) * OVERRUN_FACTOR + 1e-9:
+            return (f"budget guard: spent ${spent:.3f} + next ${nxt:.3f} would exceed 1.2x the approved ${float(approved):.3f} "
+                    f"(${float(approved) * OVERRUN_FACTOR:.3f}); stop and ask the owner")
+        return None
+
+    def _ledger_add(self, inputs: dict[str, Any], op: str, model: str, label: str, reported: float | None) -> None:
+        p, entries = self._ledger(inputs)
+        if p is None:
+            return
+        est = self.estimate_cost({"operation": "wardrobe", "model": model})
+        entries.append({"op": op, "model": model, "label": label, "usd": est, "reported_usd": reported,
+                        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        p.write_text(json.dumps(entries, indent=2))
 
     def _beautify(self, d: Path, pid: str, inputs: dict[str, Any]) -> ToolResult:
         blocked = self._guard_paid(inputs) or self._consent_problem(pid)
@@ -234,14 +278,25 @@ class TwinIdentity(BaseTool):
         cdir = d / "identity" / "candidates"
         cdir.mkdir(parents=True, exist_ok=True)
         model = inputs.get("model", DEFAULT_IMAGE_MODEL)
+        strength = inputs.get("strength", "subtle")
+        start = int(inputs.get("start_index", 0))
         made, errors = [], []
-        for i in range(int(inputs.get("count", 5))):
+        for i in range(start, start + int(inputs.get("count", 5))):
+            over = self._budget_problem(inputs, model, 1)
+            if over:
+                errors.append(over)
+                break
             out = cdir / f"cand_{i + 1:02d}.png"
-            res = self._call_image(d, beautify_prompt(i), refs[:4], out, model)
+            res = self._call_image(d, beautify_prompt(i, strength), refs[:4], out, model)
+            if res.success:
+                self._ledger_add(inputs, "beautify", model, out.name, res.cost_usd)
             (made if res.success else errors).append(out.relative_to(d).as_posix() if res.success else res.error)
         prof = pp.read_profile(pid)
         prof.setdefault("identity", {"canonical": ""})
-        prof["identity"].update({"candidates": made, "model": model})
+        known = [c for c in prof["identity"].get("candidates", []) if c not in made]
+        meta = prof["identity"].get("candidate_meta", {})
+        meta.update({m: {"strength": strength, "model": model} for m in made})
+        prof["identity"].update({"candidates": known + made, "model": model, "candidate_meta": meta})
         # canonical is required by the schema only when locked; keep a placeholder path until picked.
         prof["identity"]["canonical"] = prof["identity"].get("canonical") or "identity/canonical.png"
         pp.write_profile(d, prof)

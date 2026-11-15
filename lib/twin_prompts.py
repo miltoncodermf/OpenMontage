@@ -23,6 +23,36 @@ BEAUTIFY_VARIATIONS = [
     "slightly moody low-key light, still approachable",
 ]
 
+# Strength dial (owner decision, gate 1): the twin starts from the owner's face but is deliberately
+# changed so friends would not immediately recognise it, while staying a believable, attractive human.
+STRENGTH_NOTES = {
+    "strong": (
+        "Make a clearly noticeable but natural improvement: a slightly more defined jawline and cheekbones, a refined "
+        "nose bridge, brighter and more open eyes, tidier fuller brows, even healthy skin with natural pores, and an "
+        "overall impression about five years younger. It should look like a more polished sibling of the reference."
+    ),
+    "very_strong": (
+        "Make a strong, deliberate transformation: reshape the face to a slimmer, more V-shaped jaw with higher "
+        "cheekbones, larger and more defined eyes, a slimmer straighter nose, fuller well-shaped brows, glowing even skin "
+        "with natural texture, and an overall impression eight to ten years younger. The result should look like a "
+        "different, strikingly attractive but entirely real person who only loosely resembles the reference, so that "
+        "friends would not recognise them at first glance."
+    ),
+}
+STRENGTH_GUARDRAILS = (
+    "Keep the same sex, ethnicity, skin tone family and general hair colour, adult age, and a believable human look: "
+    "natural proportions, visible skin texture, no plastic or airbrushed skin, no cartoon, anime, 3D-render or uncanny "
+    "features, no exaggerated eyes, no extra or visible teeth, no jewellery, no text or logos."
+)
+
+STRONG_BEAUTIFY_PROMPT = (
+    "Using the attached reference photos only as a loose starting point for the person's general look, create a photoreal "
+    "head-and-shoulders studio portrait of an attractive adult. {strength_note} {guardrails} Neutral relaxed expression, "
+    "mouth closed, eyes to camera, shoulders square, simple plain dark crew-neck top, soft flattering studio key light "
+    "with gentle fill, plain softly blurred neutral studio background, shallow depth of field. Variation {variation}: "
+    "{variation_note}. 16:9 frame with the subject centered, medium close-up, plenty of headroom."
+)
+
 WARDROBE_PROMPT = (
     "Edit the attached portrait: change ONLY the clothing{hair} to: {description}. Keep the face, identity, expression, "
     "pose, lighting, camera framing, background and image quality exactly the same. Photoreal, natural fabric detail, "
@@ -37,9 +67,15 @@ IDLE_LOOP_PROMPT = (
 )
 
 
-def beautify_prompt(index: int) -> str:
+def beautify_prompt(index: int, strength: str = "subtle") -> str:
+    """``subtle`` = the original conservative prompt; ``strong`` / ``very_strong`` = deliberate, still photoreal change."""
     note = BEAUTIFY_VARIATIONS[index % len(BEAUTIFY_VARIATIONS)]
-    return BEAUTIFY_PROMPT.format(variation=index + 1, variation_note=note)
+    if strength == "subtle":
+        return BEAUTIFY_PROMPT.format(variation=index + 1, variation_note=note)
+    if strength not in STRENGTH_NOTES:
+        raise ValueError(f"unknown beautify strength {strength!r}; expected subtle, strong or very_strong")
+    return STRONG_BEAUTIFY_PROMPT.format(strength_note=STRENGTH_NOTES[strength], guardrails=STRENGTH_GUARDRAILS,
+                                         variation=index + 1, variation_note=note)
 
 
 def wardrobe_prompt(description: str, change_hair: str | None = None) -> str:

@@ -2989,3 +2989,64 @@ class TestRealProfileOnboarding:
         pp.create_profile("fake", standin=True)
         res = TwinIdentity().execute({"operation": "beautify", "profile_id": "fake", "paid_call_approved": True})
         assert "consent" not in (res.error or "")
+
+
+class TestStrongerIdentity:
+    def test_strength_prompts_name_concrete_changes_and_guardrails(self):
+        from lib.twin_prompts import beautify_prompt
+
+        subtle = beautify_prompt(0)
+        assert "recognisable as them" in subtle  # original behaviour unchanged
+        for strength, must in (("strong", "jawline"), ("very_strong", "V-shaped jaw")):
+            p = beautify_prompt(0, strength)
+            assert must in p and "recognisable as them" not in p and "photoreal" in p
+            assert "no plastic" in p and "no cartoon" in p and "same sex, ethnicity" in p
+        assert "friends would not recognise" in beautify_prompt(0, "very_strong")
+        with pytest.raises(ValueError):
+            beautify_prompt(0, "extreme")
+
+    def test_rounds_do_not_overwrite_and_budget_guard_stops_at_1_2x(self, profile_root, monkeypatch, tmp_path):
+        from PIL import Image
+        from lib import presenter_profile as pp
+        from tools.base_tool import ToolResult
+        from tools.presenters.twin_identity import TwinIdentity
+
+        d = pp.create_profile("ming")
+        pp.record_consent("ming", likeness_consent=True, statement="test")
+        (d / "identity" / "refs" / "still_01.png").write_bytes(b"x")
+        monkeypatch.setenv("ALLOW_PAID_APIS", "true")
+        prompts = []
+
+        class Fake:
+            def execute(self, inp):
+                prompts.append(inp["prompt"])
+                Image.new("RGB", (64, 36), "gray").save(inp["output_path"])
+                return ToolResult(success=True)
+
+        t = TwinIdentity()
+        monkeypatch.setattr(t, "_imagen", lambda: Fake())
+        ledger = tmp_path / "spend.json"
+        base = {"operation": "beautify", "profile_id": "ming", "paid_call_approved": True, "model": "gemini-3-pro-image",
+                "spend_ledger": str(ledger), "approved_total_usd": 0.432}  # 1.2x = 0.5184 -> 3 calls at 0.144
+        r1 = t.execute({**base, "count": 3, "strength": "strong", "start_index": 0})
+        assert r1.success and len(r1.data["candidates"]) == 3
+        r2 = t.execute({**base, "count": 3, "strength": "very_strong", "start_index": 3})
+        assert len(r2.data["candidates"]) == 0 and "budget guard" in r2.data["errors"][0]  # 0.432 + 0.144 > 0.5184
+        prof = pp.read_profile("ming")
+        assert prof["identity"]["candidates"] == ["identity/candidates/cand_01.png", "identity/candidates/cand_02.png", "identity/candidates/cand_03.png"]
+        assert prof["identity"]["candidate_meta"]["identity/candidates/cand_01.png"]["strength"] == "strong"
+        assert len(json.loads(ledger.read_text())) == 3 and "jawline" in prompts[0]
+
+    def test_low_resemblance_to_raw_footage_is_not_a_qa_failure(self, tmp_path):
+        """The twin is deliberately changed: QA may only reject near-copies of raw frames, never 'unlike the owner'."""
+        from lib.presenter_qa import RAW_HASH_MAX_DISTANCE, check_no_raw_frames
+
+        raw = _tiny_clip(tmp_path / "raw.mp4", audio=False)
+        import subprocess
+        clip = tmp_path / "twin.mp4"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=1:r=30", str(clip)], check=True)
+        res = check_no_raw_frames(clip, [raw])
+        assert res["passed"] is True and RAW_HASH_MAX_DISTANCE == 6
+        import lib.presenter_qa as qa, lib.presenter_guard as pg
+        src = Path(qa.__file__).read_text() + Path(pg.__file__).read_text()
+        assert "embedding" not in src and "similarity" not in src  # no face-resemblance gate exists
