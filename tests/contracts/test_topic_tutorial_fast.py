@@ -2778,3 +2778,44 @@ class TestFixRound1GroupESourcedImageImport:
         res = SourcedImageImport().execute({**base, "url": "https://evil.example.com/a.png"})
         assert not res.success and "allow-listed" in res.error
         assert not SourcedImageImport().execute({**base, "url": "http://upload.wikimedia.org/a.png"}).success
+
+
+class TestFixRound1GroupEComposePath:
+    def _run(self, tmp_path, monkeypatch, **extra):
+        import lib.loudness as loud
+        from tools.base_tool import ToolResult
+        from tools.video.video_compose import VideoCompose
+
+        seen = {}
+
+        def fake_remotion(self, inputs):
+            seen["props"] = inputs["edit_decisions"]
+            Path(inputs["output_path"]).write_bytes(b"x")
+            return ToolResult(success=True, data={})
+
+        def fake_master(src, dst, target):
+            seen["mastered"] = (Path(src).name, target)
+            Path(dst).write_bytes(b"m")
+            return {"within_target": True, "output": str(dst)}
+
+        monkeypatch.setattr(VideoCompose, "_remotion_render", fake_remotion)
+        monkeypatch.setattr(VideoCompose, "_run_final_review", lambda self, *a, **k: {"status": "pass", "issues_found": [], "checks": {}})
+        monkeypatch.setattr(VideoCompose, "_pre_compose_validation", lambda self, *a, **k: None)
+        monkeypatch.setattr(loud, "master_two_pass", fake_master)
+        ed = {"version": "1.0", "render_runtime": "remotion", "cuts": [{"id": "c1", "source": "a", "in_seconds": 0, "out_seconds": 1}],
+              "metadata": {"loudness_target_lufs": -14.0}}
+        out = tmp_path / "final.mp4"
+        res = VideoCompose().execute({"operation": "render", "edit_decisions": ed, "asset_manifest": {"assets": [{"id": "a", "path": "/x/a.png"}]},
+                                      "output_path": str(out), **extra})
+        return res, seen, out
+
+    def test_rich_props_are_rendered_and_the_file_is_mastered_before_review(self, tmp_path, monkeypatch):
+        props = {"cuts": [{"id": "c1", "type": "diagram", "diagramSpec": {"nodes": ["a"]}, "in_seconds": 0, "out_seconds": 1}]}
+        res, seen, out = self._run(tmp_path, monkeypatch, composition_data=props)
+        assert res.success, res.error
+        assert seen["props"] is props and seen["mastered"] == ("final.premaster.mp4", -14.0)
+        assert out.read_bytes() == b"m" and res.data["loudness_master"]["within_target"] is True
+
+    def test_without_composition_data_edit_decisions_cuts_are_used(self, tmp_path, monkeypatch):
+        res, seen, _ = self._run(tmp_path, monkeypatch)
+        assert res.success and seen["props"]["cuts"][0]["source"] == "/x/a.png"

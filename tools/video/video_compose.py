@@ -1726,8 +1726,11 @@ class VideoCompose(BaseTool):
             )
         # --- Explicit Remotion path (render_runtime == 'remotion') ---
         if self._needs_remotion(resolved_cuts):
+            # ``edit_decisions`` is schema-limited (its cuts cannot carry type/diagramSpec/screenshotSteps/...), so a
+            # caller that has the full Remotion props passes them as ``composition_data``; those are what get rendered,
+            # while edit_decisions stays the contract that QA (loudness target, diagram cuts, honesty) is checked against.
             remotion_inputs: dict[str, Any] = {
-                "edit_decisions": dict(edit_decisions, cuts=resolved_cuts),
+                "edit_decisions": inputs.get("composition_data") or dict(edit_decisions, cuts=resolved_cuts),
                 "output_path": str(output_path),
             }
             if profile:
@@ -1767,6 +1770,23 @@ class VideoCompose(BaseTool):
                 if not mux_result.success:
                     return mux_result
                 render_result.data["has_mixed_audio"] = True
+            # EBU R128 mastering (topic-tutorial): two-pass loudnorm on the rendered file BEFORE the final review, so
+            # the review measures the delivered master, not the raw mix.
+            _target = (edit_decisions.get("metadata") or {}).get("loudness_target_lufs")
+            if _target is not None and output_path.exists() and inputs.get("master_loudness", True):
+                try:
+                    from lib.loudness import master_two_pass
+
+                    _raw = output_path.with_name(output_path.stem + ".premaster" + output_path.suffix)
+                    output_path.replace(_raw)
+                    _m = master_two_pass(_raw, output_path, float(_target))
+                    render_result.data = render_result.data or {}
+                    render_result.data["loudness_master"] = {**_m, "premaster_file": str(_raw)}
+                except Exception as exc:  # noqa: BLE001 - surfaced in the render data; final review re-measures anyway
+                    if "_raw" in locals() and _raw.exists() and not output_path.exists():
+                        _raw.replace(output_path)
+                    render_result.data = render_result.data or {}
+                    render_result.data["loudness_master_error"] = str(exc)
         else:
             # --- FFmpeg fallback: only when Remotion is unavailable ---
             options = inputs.get("options", {})
