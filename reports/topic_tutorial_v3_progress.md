@@ -213,7 +213,7 @@ Commands and results:
 
 ### Group B — Local engine integration with a STAND-IN presenter (F1–F4)
 
-B0 was approved by the owner ("Approve b0": all rows as sent, $3 dev cap). Weights/code live in the model store `~/.openmontage/models` (`lib/model_store.py`; pointer file `~/.openmontage/models_dir`; they were first downloaded to an external SSD and the store was later moved to internal storage — nothing references the SSD any more); presenter profiles stay in `~/.openmontage/presenter_profiles`. Check free space with `df -h /`.
+B0 was approved by the owner ("Approve b0": all rows as sent, $3 dev cap). Weights/code live in the model store `~/Models` (shared, machine-wide) (`lib/model_store.py`; pointer file `~/.openmontage/models_dir`; they were first downloaded to an external SSD and the store was later moved to internal storage — nothing references the SSD any more); presenter profiles stay in `~/.openmontage/presenter_profiles`. Check free space with `df -h /`.
 
 **Downloads** (all licences read upstream before download; no InsightFace weights anywhere):
 

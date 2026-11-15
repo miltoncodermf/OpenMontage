@@ -2379,6 +2379,13 @@ class TestFixRound1EngineHelpers:
 
         monkeypatch.setenv("OPENMONTAGE_MODELS_DIR", str(tmp_path / "m"))
         assert model_store.models_dir() == tmp_path / "m" and model_store.model_path("a", "b") == tmp_path / "m" / "a" / "b"
+        monkeypatch.delenv("OPENMONTAGE_MODELS_DIR")
+        monkeypatch.setenv("MODELS_DIR", str(tmp_path / "shared"))
+        assert model_store.models_dir() == tmp_path / "shared"
+        monkeypatch.delenv("MODELS_DIR")
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(model_store.Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        assert model_store.models_dir() == tmp_path / "home" / "Models"
 
 
 # ---------------------------------------------------------------------------
