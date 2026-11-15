@@ -2677,3 +2677,59 @@ class TestFixRound1GroupEHonestyScope:
         ed = {"cuts": [{"source": "projects/x/assets/TEST_ONLY_intro.png"}, {"backgroundImage": "tests/fixtures/a.jpg"}],
               "assets": [{"path": "a/TEST_ONLY_b.wav"}], "x": {"video_path": "tests/fixtures/v.mp4"}, "list": {"source": ["tests/fixtures/q.png"]}}
         assert len(find_test_only_assets(ed)) == 5
+
+
+class TestFixRound1GroupEAdapter:
+    """Compose-tool gaps found by critic.scene_plan: capture offsets, screenshot mapping, overlays, continuity."""
+
+    def _compile(self, beats, assets, durations=None):
+        from tools.video.scene_plan_adapter import ScenePlanAdapter
+
+        plan = {"version": "2.0", "sections": [{"section_id": "s1", "script_section_id": "s1", "visual_beats": beats}]}
+        total = sum(b["duration_hint_seconds"] for b in beats)
+        return ScenePlanAdapter().compile(plan, {"assets": assets}, [], {"s1": durations or total})
+
+    def _beat(self, bid, vtype, dur=4.0, **kw):
+        return {"beat_id": bid, "visual_type": vtype, "duration_hint_seconds": dur, "layout": kw.pop("layout", {}), **kw}
+
+    def test_consecutive_capture_beats_continue_instead_of_replaying(self):
+        assets = [{"id": "cap_01", "asset_type": "sandbox_capture", "path": "/p/cap_01.mp4"},
+                  {"id": "cap_01_still", "asset_type": "screenshot", "path": "/p/still.png"}]
+        beats = [self._beat("a", "sandbox_capture", asset_requirements=["cap_01"]),
+                 self._beat("b", "sandbox_capture", 5.0, asset_requirements=["cap_01"]),
+                 self._beat("c", "screenshot_callout", asset_requirements=["cap_01_still"], screenshot_spec={"asset_id": "cap_01_still", "steps": []}),
+                 self._beat("d", "sandbox_capture", asset_requirements=["cap_01"])]
+        cuts = {c["id"]: c for c in self._compile(beats, assets)["cuts"]}
+        assert cuts["a"]["source_in_seconds"] == 0 and cuts["b"]["source_in_seconds"] == 4.0 and cuts["d"]["source_in_seconds"] == 9.0
+
+    def test_screenshot_beat_uses_its_own_asset_and_never_the_first_image(self):
+        assets = [{"id": "other", "asset_type": "screenshot", "path": "/p/other.png"},
+                  {"id": "mine", "asset_type": "screenshot", "path": "/p/mine.png"}]
+        ok = self._compile([self._beat("x", "screenshot_callout", asset_requirements=["mine"], screenshot_spec={"asset_id": "mine", "steps": []})], assets)
+        assert ok["cuts"][0]["backgroundImage"].endswith("mine.png")
+        with pytest.raises(ValueError, match="asset_manifest"):
+            self._compile([self._beat("y", "screenshot_callout", asset_requirements=["missing"], screenshot_spec={"asset_id": "missing"})], assets)
+
+    def test_layout_overlays_are_emitted_with_beat_timing(self):
+        ov = {"kind": "credit", "text": "Photo - CC0", "rect": {"x": 0.1, "y": 0.7, "w": 0.5, "h": 0.07}}
+        beats = [self._beat("t", "text_card", text="hi", layout={"overlays": [ov]})]
+        out = self._compile(beats, [])
+        assert out["overlays"] == [{"type": "label", "kind": "credit", "rect": ov["rect"], "text": "Photo - CC0",
+                                    "in_seconds": 0.0, "out_seconds": 4.0, "beat_id": "t"}]
+
+    def test_consecutive_beats_on_one_image_become_one_cut_but_keep_their_overlays(self):
+        assets = [{"id": "img", "asset_type": "sourced_image", "path": "/p/photo.jpg"}]
+        ov = lambda t: {"kind": "chip", "text": t, "rect": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.07}}
+        beats = [self._beat("i1", "sourced_image", asset_requirements=["img"], layout={"overlays": [ov("one")]}),
+                 self._beat("i2", "sourced_image", asset_requirements=["img"], layout={"overlays": [ov("two")]})]
+        out = self._compile(beats, assets)
+        assert len(out["cuts"]) == 1 and out["cuts"][0]["out_seconds"] == 8.0
+        assert [o["text"] for o in out["overlays"]] == ["one", "two"] and out["overlays"][1]["in_seconds"] == 4.0
+        assert out["edit_decisions"]["cuts"][0]["out_seconds"] == 8.0
+
+    def test_same_diagram_on_consecutive_beats_is_marked_continued(self):
+        spec = {"title": "T", "nodes": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "edges": [["a", "b"]]}
+        beats = [self._beat("d1", "diagram", diagram_id="D1", diagram_spec=spec), self._beat("d2", "diagram", diagram_id="D1", diagram_spec=spec),
+                 self._beat("d3", "diagram", diagram_id="D2", diagram_spec=spec)]
+        cuts = self._compile(beats, [])["cuts"]
+        assert [c.get("diagramContinue", False) for c in cuts] == [False, True, False]

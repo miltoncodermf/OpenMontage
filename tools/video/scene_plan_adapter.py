@@ -101,6 +101,11 @@ class ScenePlanAdapter:
         cuts: list[dict[str, Any]] = []
         all_captions: list[dict[str, Any]] = []
         edit_cuts: list[dict[str, Any]] = []
+        overlays: list[dict[str, Any]] = []
+        # Running playback offset per source recording: consecutive beats that use the same capture continue where the
+        # previous one stopped instead of replaying the file from 0 s (a beat may override with ``source_in_seconds``).
+        source_offsets: dict[str, float] = {}
+        prev_diagram_id: str | None = None
 
         current_time_s = 0.0
         audio_map = {a.get("scene_id"): a for a in audio_items}
@@ -240,22 +245,28 @@ class ScenePlanAdapter:
                             "edges": [["Ingest Input", "MLX Processing"], ["MLX Processing", "Verified Output"]],
                         }
                     cut["diagramSpec"] = spec
+                    if beat.get("diagram_id") and beat.get("diagram_id") == prev_diagram_id:
+                        cut["diagramContinue"] = True  # same diagram as the previous beat: no re-pop of the build animation
                     meaningful_visual_duration_s += actual_beat_dur
                     if pip_requested and presenter_path:
                         _count_presenter(presenter_path, actual_beat_dur)
 
                 elif v_type in ("screenshot_scene", "screenshot_callout"):
                     cut["type"] = "screenshot_scene"
-                    # Find screenshot asset
-                    screen_asset = next(
-                        (a for a in assets if (a.get("asset_type") or a.get("type")) in ("screenshot", "image")),
-                        None
-                    )
+                    shot_spec = beat.get("screenshot_spec", {}) or {}
+                    req_ids = [r if isinstance(r, str) else (r.get("id") or r.get("type")) for r in reqs]
+                    wanted = [shot_spec.get("asset_id"), shot_spec.get("source_screenshot"), *req_ids]
+                    screen_asset = next((asset_by_id[w] for w in wanted if w and w in asset_by_id), None)
+                    if screen_asset is None:
+                        if any(w for w in wanted):
+                            raise ValueError(f"beat '{beat_id}' ({v_type}): none of its assets {[w for w in wanted if w]} is in the asset_manifest")
+                        # legacy beats that name no asset at all keep the old 'first screenshot' behaviour
+                        screen_asset = next((a for a in assets if (a.get("asset_type") or a.get("type")) in ("screenshot", "image")), None)
                     screen_path = screen_asset["path"] if screen_asset else "assets/images/ui_screenshot.png"
                     if screen_path and self.project_dir and not Path(screen_path).is_absolute():
                         screen_path = str((self.project_dir / screen_path).resolve())
                     cut["backgroundImage"] = screen_path
-                    cut["screenshotSteps"] = beat.get("screenshot_spec", {}).get("steps") or [
+                    cut["screenshotSteps"] = shot_spec.get("steps") or [
                         {"kind": "highlight_box", "region": {"x": 0.2, "y": 0.25, "w": 0.6, "h": 0.45}, "color": accent_color, "durationSeconds": actual_beat_dur * 0.7},
                         {"kind": "callout_balloon", "anchor": [0.5, 0.45], "text": section.get("learning_objective", "Key Interface Control"), "position": "top", "durationSeconds": actual_beat_dur * 0.5},
                     ]
@@ -275,6 +286,9 @@ class ScenePlanAdapter:
                     if self.project_dir and not Path(vp).is_absolute():
                         vp = str((self.project_dir / vp).resolve())
                     cut["source"] = vp
+                    start_at = float(beat["source_in_seconds"]) if beat.get("source_in_seconds") is not None else source_offsets.get(vp, 0.0)
+                    cut["source_in_seconds"] = round(start_at, 3)
+                    source_offsets[vp] = start_at + actual_beat_dur
                     meaningful_visual_duration_s += actual_beat_dur
                     if pip_requested and presenter_path:
                         _count_presenter(presenter_path, actual_beat_dur)
@@ -302,6 +316,9 @@ class ScenePlanAdapter:
                     if video_path and self.project_dir and not Path(video_path).is_absolute():
                         video_path = str((self.project_dir / video_path).resolve())
                     cut["source"] = video_path
+                    start_at = float(beat["source_in_seconds"]) if beat.get("source_in_seconds") is not None else source_offsets.get(video_path, 0.0)
+                    cut["source_in_seconds"] = round(start_at, 3)
+                    source_offsets[video_path] = start_at + actual_beat_dur
                     meaningful_visual_duration_s += actual_beat_dur
                     if pip_requested and presenter_path:
                         _count_presenter(presenter_path, actual_beat_dur)
@@ -337,6 +354,15 @@ class ScenePlanAdapter:
                 else:
                     raise ValueError(f"Unknown visual_type '{v_type}' on beat '{beat_id}'")
 
+                prev_diagram_id = beat.get("diagram_id") if cut.get("type") == "diagram" else None
+                for ov in layout.get("overlays") or []:
+                    item = {"type": "label", "kind": ov.get("kind", "label"), "rect": ov.get("rect"),
+                            "in_seconds": in_s, "out_seconds": out_s, "beat_id": beat_id}
+                    if ov.get("items") is not None:
+                        item["items"] = [str(i) for i in ov["items"]]
+                    if ov.get("text") is not None:
+                        item["text"] = str(ov["text"])
+                    overlays.append(item)
                 cuts.append(cut)
                 edit_cuts.append({
                     "id": f"cut-{len(cuts)}",
@@ -357,6 +383,26 @@ class ScenePlanAdapter:
                         "startMs": int(round(ts["startMs"])) + offset_ms,
                         "endMs": int(round(ts["endMs"])) + offset_ms,
                     })
+
+        # Consecutive beats on the same still image become ONE cut (overlays stay per-beat), so the fade-in and
+        # push-in of the image do not restart every few seconds.
+        merged_cuts: list[dict[str, Any]] = []
+        merged_edit: list[dict[str, Any]] = []
+        for c, e in zip(cuts, edit_cuts):
+            prev = merged_cuts[-1] if merged_cuts else None
+            if (prev is not None and c.get("source") and prev.get("source") == c.get("source")
+                    and c.get("type") is None and prev.get("type") is None
+                    and c.get("animation") == prev.get("animation")
+                    and abs(prev["out_seconds"] - c["in_seconds"]) < 0.011):
+                prev["out_seconds"] = c["out_seconds"]
+                prev["narrationText"] = (prev.get("narrationText", "") + " " + c.get("narrationText", "")).strip()
+                merged_edit[-1]["out_seconds"] = e["out_seconds"]
+                continue
+            merged_cuts.append(c)
+            merged_edit.append(e)
+        cuts, edit_cuts = merged_cuts, merged_edit
+        for n, e in enumerate(edit_cuts, 1):
+            e["id"] = f"cut-{n}"
 
         # Calculate analytics
         text_card_ratio = round((text_card_duration_s / max(0.1, total_runtime_s)), 3)
@@ -406,6 +452,7 @@ class ScenePlanAdapter:
             "canvas": canvas,
             "cuts": cuts,
             "captions": all_captions,
+            "overlays": overlays,
             "edit_decisions": edit_decisions,
             "visual_analytics": visual_analytics,
         }

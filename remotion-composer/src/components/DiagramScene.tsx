@@ -35,6 +35,8 @@ export interface DiagramSceneProps {
   accentColor?: string;
   textColor?: string;
   backgroundColor?: string;
+  /** Same diagram as the previous beat: start with the build animation already settled. */
+  continued?: boolean;
 }
 
 export const DiagramScene: React.FC<DiagramSceneProps> = ({
@@ -42,8 +44,10 @@ export const DiagramScene: React.FC<DiagramSceneProps> = ({
   accentColor = "#22D3EE",
   textColor = "#F8FAFC",
   backgroundColor = "transparent",
+  continued = false,
 }) => {
-  const frame = useCurrentFrame();
+  const rawFrame = useCurrentFrame();
+  const frame = rawFrame + (continued ? 90 : 0);
   const { fps, width, height } = useVideoConfig();
   const canvas = { width: width || 1920, height: height || 1080 };
   // Legibility (spec §5.9): sizes are defined at 1080p and scale with canvas height.

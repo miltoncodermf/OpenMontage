@@ -273,6 +273,7 @@ interface Cut {
   cursorStartAt?: [number, number];
   // Diagram props (type: "diagram")
   diagramSpec?: DiagramSpec;
+  diagramContinue?: boolean;
   // Presenter props (type: "presenter_fullscreen", "presenter_screen_split", or presenterPip overlay)
   presenterVideo?: string;
   /** Presenter clip is an alpha matte (ProRes 4444 / VP9): composited as a separate layer over a backdrop. */
@@ -289,7 +290,11 @@ interface Cut {
 }
 
 interface Overlay {
-  type: "section_title" | "stat_reveal" | "hero_title" | "provider_chip";
+  type: "section_title" | "stat_reveal" | "hero_title" | "provider_chip" | "label";
+  // label: free-text overlay placed by a normalized rect (scene-plan layout.overlays)
+  kind?: string;
+  rect?: { x: number; y: number; w: number; h: number };
+  items?: string[];
   in_seconds: number;
   out_seconds: number;
   text?: string;
@@ -618,6 +623,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
       return maybeWrapWithBg(
         <DiagramScene
           diagramSpec={cut.diagramSpec}
+          continued={cut.diagramContinue}
           accentColor={accent}
           textColor={textColor}
           backgroundColor={bgColor}
@@ -873,6 +879,64 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
 // Overlay renderer
 // ---------------------------------------------------------------------------
 
+// Label overlay: text placed by a normalized rect. Sizes are for 1080p and scale with canvas height; the
+// smallest text is 30 px so on-screen credits and chips stay legible.
+const LabelOverlay: React.FC<{ overlay: Overlay; theme: ThemeConfig }> = ({ overlay, theme }) => {
+  const frame = useCurrentFrame();
+  const { fps, height } = useVideoConfig();
+  const scale = height / 1080;
+  const r = overlay.rect as { x: number; y: number; w: number; h: number };
+  const kind = overlay.kind ?? "label";
+  const fade = interpolate(frame, [0, Math.round(fps * 0.3)], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const big = kind === "title" || kind === "section_title";
+  const pill = ["chip", "url_chip", "pinned_label", "label", "chip_stack"].includes(kind);
+  const fontSize = Math.round((big ? 72 : kind === "recap_list" ? 42 : 32) * scale);
+  const items = overlay.items ?? [];
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: `${r.x * 100}%`,
+        top: `${r.y * 100}%`,
+        width: `${r.w * 100}%`,
+        minHeight: `${r.h * 100}%`,
+        opacity: fade,
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "center",
+        gap: Math.round(10 * scale),
+        boxSizing: "border-box",
+        padding: pill ? `${Math.round(8 * scale)}px ${Math.round(20 * scale)}px` : `${Math.round(6 * scale)}px`,
+        borderRadius: pill ? Math.round(12 * scale) : 0,
+        background: pill ? "rgba(15,23,42,0.82)" : "rgba(15,23,42,0.55)",
+        border: pill ? `2px solid ${theme.accentColor}` : "none",
+        color: theme.textColor,
+        fontFamily: theme.headingFont || undefined,
+        fontSize,
+        fontWeight: big ? 800 : 600,
+        lineHeight: 1.2,
+        zIndex: 20,
+      }}
+    >
+      {items.length > 0
+        ? items.map((it, i) => (
+            <div
+              key={i}
+              style={{
+                opacity: interpolate(frame, [i * Math.round(fps * 0.8), i * Math.round(fps * 0.8) + Math.round(fps * 0.4)], [0, 1], {
+                  extrapolateLeft: "clamp",
+                  extrapolateRight: "clamp",
+                }),
+              }}
+            >
+              {it}
+            </div>
+          ))
+        : overlay.text}
+    </div>
+  );
+};
+
 const OverlayRenderer: React.FC<{ overlay: Overlay; theme: ThemeConfig }> = ({
   overlay,
   theme,
@@ -910,6 +974,9 @@ const OverlayRenderer: React.FC<{ overlay: Overlay; theme: ThemeConfig }> = ({
         scrimBackground={heroScrim(theme)}
       />
     );
+  }
+  if (overlay.type === "label" && overlay.rect) {
+    return <LabelOverlay overlay={overlay} theme={theme} />;
   }
   if (overlay.type === "provider_chip" && overlay.providers) {
     return (
