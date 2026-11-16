@@ -151,7 +151,15 @@ class MlxTTSProvider(BaseTool):
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         text = str(inputs.get("text", "")).strip()
         # Batches longer than ~30 s of speech (~450 chars) take the host-wide heavy lock (spec §5.7/§9).
-        with heavy_if(len(text) > 450, "mlx_tts:batch"):
+        heavy = len(text) > 450
+        if inputs.get("voice_profile"):
+            try:
+                import json as _j
+
+                heavy = heavy or _j.loads(Path(inputs["voice_profile"]).read_text(encoding="utf-8")).get("engine") == "chatterbox"
+            except (OSError, ValueError):
+                pass
+        with heavy_if(heavy, "mlx_tts:batch"):
             return self._execute(inputs)
 
     def _execute(self, inputs: dict[str, Any]) -> ToolResult:
@@ -226,11 +234,13 @@ class MlxTTSProvider(BaseTool):
             return ToolResult(success=False, error=f"voice_profile not found: {prof_path}")
         prof = _json.loads(prof_path.read_text(encoding="utf-8"))
         engine = prof.get("engine")
+        if engine == "chatterbox":
+            return self._execute_chatterbox_profile(inputs, text, started, prof_path, prof)
         if engine != "kokoro":
             return ToolResult(
                 success=False,
-                error=f"voice profile engine {engine!r} is not available in mlx_tts (only 'kokoro' is wired). "
-                      "Chatterbox profiles need the chatterbox backend; ask the owner before switching engines.",
+                error=f"voice profile engine {engine!r} is not available in mlx_tts ('kokoro' and 'chatterbox' are wired). "
+                      "Ask the owner before switching engines.",
             )
         output_path = Path(inputs.get("output_path", "narration.wav")).resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -257,6 +267,32 @@ class MlxTTSProvider(BaseTool):
                 "timestamps": self._build_word_timestamps(text, duration_s, audio_path=output_path),
                 "output": str(output_path), "format": "wav", "voice_profile": str(prof_path),
                 "voice_profile_sha256": __import__("hashlib").sha256(prof_path.read_bytes()).hexdigest(),
+            },
+            artifacts=[str(output_path)], duration_seconds=round(time.time() - started, 2), cost_usd=0.0,
+            model=prof.get("candidate_id"),
+        )
+
+    def _execute_chatterbox_profile(self, inputs: dict[str, Any], text: str, started: float, prof_path: Path, prof: dict[str, Any]) -> ToolResult:
+        """Locked Chatterbox voice: per-sentence ASR-checked synthesis, speed factor, polish chain (no silent fallback)."""
+        from lib import chatterbox_voice
+
+        output_path = Path(inputs.get("output_path", "narration.wav")).resolve()
+        try:
+            rep = chatterbox_voice.synthesize_narration(prof_path, text, output_path)
+        except Exception as exc:  # noqa: BLE001 — never substitute another voice silently
+            return ToolResult(success=False, error=f"chatterbox voice-profile synthesis failed (no fallback voice used): {exc}")
+        info = sf.info(str(output_path))
+        duration_s = round(info.frames / float(info.samplerate), 3)  # measured on the slowed, polished file
+        return ToolResult(
+            success=True,
+            data={
+                "provider": "mlx", "model": f"chatterbox/{prof.get('candidate_id', 'profile')}",
+                "sample_rate": int(info.samplerate), "duration_s": duration_s, "word_count": len(text.split()),
+                "timestamps": self._build_word_timestamps(text, duration_s, audio_path=output_path),
+                "output": str(output_path), "format": "wav", "voice_profile": str(prof_path),
+                "voice_profile_sha256": __import__("hashlib").sha256(prof_path.read_bytes()).hexdigest(),
+                "speed": rep["speed"], "time_stretch": rep["time_stretch"], "synthesis": rep,
+                **({"warning": rep["warning"]} if rep["warning"] else {}),
             },
             artifacts=[str(output_path)], duration_seconds=round(time.time() - started, 2), cost_usd=0.0,
             model=prof.get("candidate_id"),

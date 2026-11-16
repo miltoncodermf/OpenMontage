@@ -1502,11 +1502,14 @@ class TestV3VoiceLab:
         if not chatterbox_available():
             assert VoiceLab().get_status() == ToolStatus.DEGRADED
 
-    def test_mlx_tts_refuses_non_kokoro_voice_profile(self, tmp_path):
+    def test_mlx_tts_refuses_unknown_engine_and_never_falls_back_for_broken_chatterbox(self, tmp_path):
         prof = tmp_path / "voice_profile.json"
-        prof.write_text(json.dumps({"engine": "chatterbox", "recipe": {}}))
+        prof.write_text(json.dumps({"engine": "some_other_engine", "recipe": {}}))
         res = MlxTTSProvider().execute({"text": "hi", "voice_profile": str(prof), "output_path": str(tmp_path / "o.wav")})
-        assert res.success is False and "ask the owner" in res.error
+        assert res.success is False and "Ask the owner" in res.error
+        prof.write_text(json.dumps({"engine": "chatterbox", "recipe": {}}))  # incomplete profile: error, no substitute voice
+        res = MlxTTSProvider().execute({"text": "hi", "voice_profile": str(prof), "output_path": str(tmp_path / "o.wav")})
+        assert res.success is False and "no fallback voice used" in res.error
 
 
 class TestV3TwinIdentityGuards:
@@ -3261,3 +3264,106 @@ class TestChatterboxTruncationFix:
         monkeypatch.setattr(cr.subprocess, "run", fake_run)
         cr.synthesize(tmp_path / "o.wav", {}, [], ["A.", "B."], tmp_path / "out", only=["c1:1"], seeds={"c1:1": 7})
         assert seen["sentences"] == ["A.", "B."] and seen["only"] == ["c1:1"] and seen["seeds"] == {"c1:1": 7}
+
+
+class TestLockedChatterboxVoice:
+    def _profile(self, tmp_path, speed=0.95):
+        import json
+        import soundfile as sf
+        import numpy as np
+        from lib import voice_lab as vl
+
+        root = tmp_path / "ming"
+        (root / "voice").mkdir(parents=True)
+        (root / "voice" / "donors").mkdir()
+        (root / "raw" / "working").mkdir(parents=True)
+        for rel in ("raw/working/voice_ref.wav", "voice/donors/am_adam.wav"):
+            sf.write(str(root / rel), np.zeros(2400, dtype="float32"), 24000)
+        rec = next(r for r in vl.CHATTERBOX_BLENDS if r["candidate_id"] == "c2_owner50")
+        recipe = {k: rec[k] for k in ("owner_weight", "donors", "exaggeration", "cfg", "pitch_semitones")}
+        prof = vl.build_voice_profile({"candidate_id": "c2_owner50", "engine": "chatterbox", "recipe": recipe, "sample": "voice/sample.wav",
+                                       "owner_ref": "raw/working/voice_ref.wav", "donor_refs": {"am_adam": "voice/donors/am_adam.wav"}},
+                                      model_version="x", tempo=speed)
+        (root / "voice" / "voice_profile.json").write_text(json.dumps(prof))
+        return root / "voice" / "voice_profile.json", prof
+
+    def test_profile_records_blend_references_and_speed(self, tmp_path):
+        from lib import chatterbox_voice as cv
+
+        path, prof = self._profile(tmp_path)
+        assert prof["speed"] == 0.95 and prof["time_stretch"] != "none" and "0.95" in prof["time_stretch"]
+        assert prof["owner_ref"] == "raw/working/voice_ref.wav" and prof["recipe"]["owner_weight"] == 0.5
+        r = cv.resolve_profile(path)
+        assert r["speed"] == 0.95 and r["candidate"]["donors"][0]["voice"] == "am_adam" and r["owner_ref"].is_file()
+        (path.parent / "donors" / "am_adam.wav").unlink()
+        with pytest.raises(FileNotFoundError, match="am_adam"):
+            cv.resolve_profile(path)
+
+    def test_split_keeps_sentences_splits_long_ones_and_marks_paragraphs(self):
+        from lib import chatterbox_voice as cv
+
+        chunks = cv.split_for_synthesis("One short one. Two is here.\n\nNew paragraph now.")
+        assert [c for c, _ in chunks] == ["One short one.", "Two is here.", "New paragraph now."]
+        assert chunks[1][1] == 0.45 and chunks[0][1] == 0.16 and chunks[2][1] == 0.45
+        long = " ".join(f"w{i}," if i % 10 == 9 else f"w{i}" for i in range(75)) + "."
+        parts = cv.split_for_synthesis(long)
+        assert len(parts) >= 3 and all(len(c.split()) <= 30 for c, _ in parts)
+
+    def test_narration_rerolls_only_the_cut_sentence_and_slows_the_audio(self, tmp_path, monkeypatch):
+        import numpy as np
+        import soundfile as sf
+        from lib import chatterbox_runner as cr
+        from lib import chatterbox_voice as cv
+        from lib import voice_lab as vl
+
+        path, _ = self._profile(tmp_path)
+        calls = []
+
+        def fake_synth(owner, donors, cands, sentences, out_dir, seed=1234, only=None, seeds=None, **kw):
+            calls.append({"only": only, "seeds": seeds})
+            out = Path(out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            chunks = []
+            for i, s in enumerate(sentences):
+                key = f"{cands[0]['candidate_id']}:{i}"
+                if only and key not in only:
+                    continue
+                f = out / f"{i}.wav"
+                sf.write(str(f), (0.1 * np.sin(np.linspace(0, 600, 24000))).astype("float32"), 24000)  # 1 s tone
+                chunks.append({"idx": i, "raw": str(f), "seed": 1, "sr": 24000, "text": s, "seconds": 0, "audio_s": 1.0})
+            return {"candidates": [{"candidate_id": cands[0]["candidate_id"], "sr": 24000, "weights": [1], "chunks": chunks}]}
+
+        monkeypatch.setattr(cr, "available", lambda: (True, "ok"))
+        monkeypatch.setattr(cr, "synthesize", fake_synth)
+
+        def fake_asr(wav, text, model_size="base"):
+            # first take of sentence 2 is cut short; later takes are complete
+            cut = "second sentence" in text and len(calls) == 1
+            heard = "the second" if cut else text
+            return {"coverage": 0.4 if cut else 1.0, "heard": heard}
+
+        monkeypatch.setattr(vl, "asr_coverage", fake_asr)
+        out = tmp_path / "n.wav"
+        rep = cv.synthesize_narration(path, "The first sentence is here. The second sentence ends here now.", out)
+        assert len(calls) == 2 and calls[1]["only"] == ["c2_owner50:1"]  # only the cut sentence was re-rolled
+        assert rep["rerolled"] == 1 and rep["takes"] == [1, 2] and rep["warning"] is None and rep["speed"] == 0.95
+        dur = sf.info(str(out)).frames / sf.info(str(out)).samplerate
+        assert 2.16 / 0.95 - 0.25 < dur < 2.16 / 0.95 + 0.25  # 2 x 1 s + 0.45 s pause, stretched by 1/0.95
+        assert sf.info(str(out)).samplerate == 48000
+
+    def test_mlx_tts_uses_locked_chatterbox_and_reports_the_slowed_duration(self, tmp_path, monkeypatch):
+        import numpy as np
+        import soundfile as sf
+        from lib import chatterbox_voice as cv
+
+        path, _ = self._profile(tmp_path)
+
+        def fake(prof_path, text, out_path, **kw):
+            sf.write(str(out_path), np.zeros(48000 * 3, dtype="float32"), 48000)
+            return {"sentences": 1, "speed": 0.95, "time_stretch": "x", "takes": [1], "rerolled": 0, "incomplete_sentences": [], "warning": None}
+
+        monkeypatch.setattr(cv, "synthesize_narration", fake)
+        res = MlxTTSProvider().execute({"text": "Hello there.", "voice_profile": str(path), "output_path": str(tmp_path / "o.wav")})
+        assert res.success, res.error
+        assert res.data["model"] == "chatterbox/c2_owner50" and res.data["duration_s"] == 3.0 and res.data["speed"] == 0.95
+        assert res.data["timestamps"] and res.data["timestamps"][-1]["endMs"] <= 3000.0 + 1

@@ -110,11 +110,36 @@ def kokoro_synthesize(tts: Any, text: str, recipe: dict[str, Any], sample_rate: 
     return tts.generate(text, voice=voice, speed=float(recipe.get("speed", 1.0)), sample_rate=sample_rate)
 
 
-def polish(src: Path, dst: Path) -> None:
-    """Apply the fixed polish chain (same for every candidate, so comparison is fair)."""
+def time_stretch_filter(tempo: float) -> str:
+    """Pitch-preserving tempo filter (rubberband when this ffmpeg has it, else atempo). Chatterbox has no native speed control."""
+    if abs(tempo - 1.0) < 1e-9:
+        return ""
+    if not 0.5 <= tempo <= 2.0:
+        raise ValueError("tempo must be within 0.5-2.0")
+    return f"rubberband=tempo={tempo:.4f}:pitchq=quality" if _has_filter("rubberband") else f"atempo={tempo:.4f}"
+
+
+_FILTERS: dict[str, bool] = {}
+
+
+def _has_filter(name: str) -> bool:
+    if name not in _FILTERS:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True, timeout=30).stdout
+        _FILTERS[name] = any(len(ln.split()) > 1 and ln.split()[1] == name for ln in out.splitlines())
+    return _FILTERS[name]
+
+
+def polish(src: Path, dst: Path, tempo: float = 1.0) -> None:
+    """Apply the fixed polish chain (same for every candidate, so comparison is fair).
+
+    ``tempo`` (< 1 = slower) is applied BEFORE the chain so loudness normalisation sees the final audio; everything
+    downstream (captions, scene timing) measures the stretched file.
+    """
+    stretch = time_stretch_filter(tempo)
+    chain = (stretch + "," if stretch else "") + POLISH_CHAIN["ffmpeg_filter"]
     subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-af", POLISH_CHAIN["ffmpeg_filter"], "-ar", "48000", str(dst)],
-        check=True, timeout=120,
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-af", chain, "-ar", "48000", str(dst)],
+        check=True, timeout=600,
     )
 
 
@@ -144,7 +169,7 @@ def write_candidates_page(out_dir: Path, candidates: list[dict[str, Any]], title
     return out
 
 
-def build_voice_profile(candidate: dict[str, Any], *, model_version: str, seed: int = 1234) -> dict[str, Any]:
+def build_voice_profile(candidate: dict[str, Any], *, model_version: str, seed: int = 1234, tempo: float = 1.0) -> dict[str, Any]:
     """voice_profile.json content for a picked candidate (locked recipe)."""
     engine = candidate["engine"]
     prof: dict[str, Any] = {
@@ -156,6 +181,16 @@ def build_voice_profile(candidate: dict[str, Any], *, model_version: str, seed: 
     if engine == "chatterbox":
         prof["watermark_note"] = "Chatterbox outputs carry an inaudible Perth watermark (accepted)."
         prof["embedding"] = candidate.get("embedding")
+        # Everything needed to re-synthesize, relative to the profile root (locked with the profile's sha256 manifest).
+        prof["owner_ref"] = candidate["owner_ref"]
+        prof["donor_refs"] = candidate["donor_refs"]
+        prof["speed"] = float(tempo)
+        prof["time_stretch"] = time_stretch_filter(tempo) or "none"
+        prof["synthesis"] = {"unit": "sentence", "asr_check": {"min_coverage": 0.85, "ending_must_be_heard": True},
+                             "max_takes": 4, "paragraph_gap_s": 0.45, "sentence_gap_s": 0.16, "max_words_per_chunk": 30}
+        prof["notes"] = ("Per-sentence Chatterbox synthesis, each sentence ASR-checked and re-rolled if cut short; speed < 1 is a "
+                         "pitch-preserving time-stretch applied before the polish chain (Chatterbox has no native speed control). "
+                         "Seeded, reproducible up to GPU jitter, not byte-identical.")
     return prof
 
 
@@ -279,23 +314,35 @@ def chunk_ok(target: str, heard: str, coverage: float, min_coverage: float = 0.8
     return coverage >= min_coverage and any(w in heard_tail for w in tail)
 
 
-def assemble_chunks(paths: list[Path], dst: Path, gap_s: float = 0.16) -> float:
+def assemble_chunks(paths: list[Path], dst: Path, gap_s: float | list[float] = 0.16) -> float:
     """Concatenate per-sentence wavs with a short pause; returns the duration in seconds."""
     import numpy as np
     import soundfile as sf
 
     parts, sr = [], None
-    for p in paths:
+    gaps = list(gap_s) if isinstance(gap_s, (list, tuple)) else [gap_s] * len(paths)
+    for p, g in zip(paths, gaps):
         a, r = sf.read(str(p), dtype="float32")
         if a.ndim > 1:
             a = a.mean(axis=1)
         sr = sr or r
         if r != sr:
             raise ValueError("chunks have different sample rates")
-        parts += [a, np.zeros(int(gap_s * r), dtype="float32")]
+        parts += [a, np.zeros(int(g * r), dtype="float32")]
     out = np.concatenate(parts[:-1]) if parts else np.zeros(1, dtype="float32")
     sf.write(str(dst), out, sr)
     return round(len(out) / sr, 2)
+
+
+_WHISPER: dict[str, Any] = {}
+
+
+def _whisper(model_size: str) -> Any:
+    if model_size not in _WHISPER:
+        from faster_whisper import WhisperModel
+
+        _WHISPER[model_size] = WhisperModel(model_size, device="cpu", compute_type="int8")
+    return _WHISPER[model_size]
 
 
 def asr_coverage(wav: Path, text: str, model_size: str = "base") -> dict[str, Any]:
@@ -303,10 +350,9 @@ def asr_coverage(wav: Path, text: str, model_size: str = "base") -> dict[str, An
     import difflib
 
     import librosa
-    from faster_whisper import WhisperModel
 
     y, _ = librosa.load(str(wav), sr=16000)  # decode with librosa (PyAV in some builds rejects faster-whisper's open() kwargs)
-    segs, _ = WhisperModel(model_size, device="cpu", compute_type="int8").transcribe(y, language="en")
+    segs, _ = _whisper(model_size).transcribe(y, language="en")
     heard, target = _words(" ".join(s.text for s in segs)), _words(text)
     sm = difflib.SequenceMatcher(a=target, b=heard, autojunk=False)
     matched = sum(b.size for b in sm.get_matching_blocks())
