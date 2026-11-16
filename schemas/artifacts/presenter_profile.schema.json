@@ -38,6 +38,14 @@
         "model": { "type": "string" },
         "tweaks": { "type": "string" },
         "wardrobe_catalog": { "type": "string" },
+        "hair_catalog": { "type": "string" },
+        "background_catalog": { "type": "string" },
+        "candidate_meta": { "type": "object" },
+        "defaults": {
+          "type": "object",
+          "description": "Owner's default variants; every other catalog entry stays selectable per tutorial",
+          "properties": { "hairstyle": { "type": "string" }, "background": { "type": "string" } }
+        },
         "identity_transform": { "const": "beautified" }
       }
     },

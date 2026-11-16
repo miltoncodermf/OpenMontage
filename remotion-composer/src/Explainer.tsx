@@ -36,6 +36,7 @@ import { resolveTheme, type ThemeConfig, DEFAULT_THEME } from "./Root";
 import { DiagramScene } from "./components/DiagramScene";
 import type { DiagramSpec } from "./components/DiagramScene";
 import { PresenterFullScreen } from "./components/PresenterFullScreen";
+import type { PresenterBackdropSpec } from "./components/PresenterBackdrop";
 import { PresenterPip } from "./components/PresenterPip";
 import { PresenterScreenSplit } from "./components/PresenterScreenSplit";
 
@@ -278,6 +279,8 @@ interface Cut {
   presenterVideo?: string;
   /** Presenter clip is an alpha matte (ProRes 4444 / VP9): composited as a separate layer over a backdrop. */
   presenterAlpha?: boolean;
+  /** Background catalog entry for the presenter (see lib/backdrops.py): procedural spec or plate image. */
+  presenterBackdrop?: PresenterBackdropSpec;
   /** Corner chosen by the adapter so the PIP never covers focusRegion. */
   presenterPipPosition?: "bottom-right" | "bottom-left" | "top-right" | "top-left";
   /** Normalized focus region {x,y,w,h} of what matters in this beat (spec §5.9). */
@@ -642,6 +645,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
           accentColor={accent}
           textColor={textColor}
           alpha={cut.presenterAlpha}
+          backdrop={cut.presenterBackdrop}
           backdropColor={theme.backgroundColor || "#0F172A"}
         />
       );
@@ -846,6 +850,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         splitRatio={cut.splitRatio || 0.35}
         accentColor={accent}
         alpha={cut.presenterAlpha}
+        backdrop={cut.presenterBackdrop}
       >
         {coreElement}
       </PresenterScreenSplit>

@@ -3143,3 +3143,65 @@ def _info_img(key):
     im = Image.new("RGB", (8, 8))
     im.info["k"] = key
     return im
+
+
+class TestDefaultsAndRemotionBackdrop:
+    def _profile(self, profile_root):
+        import json
+        from PIL import Image
+        from lib import backdrops as bd
+        from lib import presenter_profile as pp
+
+        d = pp.create_profile("ming")
+        Image.new("RGB", (64, 36), "gray").save(d / "identity" / "canonical.png")
+        (d / "identity" / "hair").mkdir(exist_ok=True)
+        Image.new("RGB", (64, 36), "white").save(d / "identity" / "hair" / "hair_a.png")
+        (d / "identity" / "hair_catalog.json").write_text(json.dumps([{"id": "hair_a", "image": "identity/hair/hair_a.png"}]))
+        (d / "backgrounds").mkdir(exist_ok=True)
+        Image.new("RGB", (64, 36), "green").save(d / "backgrounds" / "bg_plate.png")
+        bd.install_procedural(d)
+        bd.upsert(d, {"id": "bg_plate", "kind": "plate", "label": "Plate", "image": "backgrounds/bg_plate.png"})
+        prof = pp.read_profile("ming")
+        prof["identity"] = {"canonical": "identity/canonical.png"}
+        pp.write_profile(d, prof)
+        return d
+
+    def test_set_defaults_validates_against_catalogs_and_keeps_the_rest(self, profile_root):
+        from lib import presenter_profile as pp
+
+        d = self._profile(profile_root)
+        assert pp.set_defaults("ming", hairstyle="hair_a", background="bg_plate") == {"hairstyle": "hair_a", "background": "bg_plate"}
+        assert pp.default_portrait("ming") == d / "identity" / "hair" / "hair_a.png"
+        with pytest.raises(pp.ProfileError):
+            pp.set_defaults("ming", hairstyle="hair_nope")
+        with pytest.raises(pp.ProfileError):
+            pp.set_defaults("ming", background="bg_nope")
+        assert pp.set_defaults("ming", hairstyle="current")["background"] == "bg_plate"  # partial update keeps the other
+        assert pp.default_portrait("ming") == d / "identity" / "canonical.png"
+        assert pp.verify_profile("ming", require_locked=False) == []
+
+    def test_remotion_spec_for_plate_and_procedural(self, profile_root):
+        from lib import backdrops as bd
+
+        d = self._profile(profile_root)
+        plate = bd.remotion_spec(d, "bg_plate")
+        assert plate["kind"] == "plate" and plate["src"] == str((d / "backgrounds" / "bg_plate.png").resolve())
+        proc = bd.remotion_spec(d, "bg_dark_tech")
+        assert proc["kind"] == "procedural" and proc["overlay"] == "grid_glow" and len(proc["stops"]) >= 2
+        assert bd.validate_remotion_spec(plate) == [] and bd.validate_remotion_spec(proc) == []
+        assert bd.validate_remotion_spec({"kind": "plate"}) and bd.validate_remotion_spec({"kind": "nope"})
+        with pytest.raises(KeyError):
+            bd.remotion_spec(d, "bg_missing")
+
+    def test_adapter_passes_backdrop_only_for_alpha_presenter_and_rejects_bad_spec(self):
+        from tools.video.scene_plan_adapter import ScenePlanAdapter
+
+        spec = {"kind": "procedural", "id": "bg_soft_gradient", "angle": 160, "stops": [[0, "#fff"], [1, "#ccc"]], "overlay": None}
+        plan = {**V3_PLAN, "presenter_backdrop": spec}
+        alpha = ScenePlanAdapter().compile(plan, {"assets": [REAL_PRESENTER, REAL_MATTE]}, [], {"s1": 5.0, "s2": 6.0})
+        assert all(c["presenterBackdrop"] == spec for c in alpha["cuts"] if c.get("presenterVideo"))
+        plain = ScenePlanAdapter().compile(plan, {"assets": [REAL_PRESENTER]}, [], {"s1": 5.0, "s2": 6.0})
+        assert not any("presenterBackdrop" in c for c in plain["cuts"])
+        with pytest.raises(ValueError, match="backdrop"):
+            ScenePlanAdapter().compile({**V3_PLAN, "presenter_backdrop": {"kind": "plate"}},
+                                       {"assets": [REAL_PRESENTER, REAL_MATTE]}, [], {"s1": 5.0, "s2": 6.0})

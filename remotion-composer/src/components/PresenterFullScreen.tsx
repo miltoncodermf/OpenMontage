@@ -9,6 +9,7 @@ import {
 } from "remotion";
 import { resolveAsset } from "../lib/resolveAsset";
 import { getLayout, toPx } from "../layouts";
+import { PresenterBackdrop, PresenterBackdropSpec } from "./PresenterBackdrop";
 
 export interface PresenterFullScreenProps {
   src: string;
@@ -20,6 +21,8 @@ export interface PresenterFullScreenProps {
   /** Presenter clip has alpha: draw a backdrop under it (layer stack: backdrop -> presenter -> captions). */
   alpha?: boolean;
   backdropColor?: string;
+  /** Owner's background catalog entry (procedural spec or plate image); drawn under the alpha presenter. */
+  backdrop?: PresenterBackdropSpec;
 }
 
 export const PresenterFullScreen: React.FC<PresenterFullScreenProps> = ({
@@ -31,6 +34,7 @@ export const PresenterFullScreen: React.FC<PresenterFullScreenProps> = ({
   textColor = "#F8FAFC",
   alpha = false,
   backdropColor = "#0F172A",
+  backdrop,
 }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames, width, height } = useVideoConfig();
@@ -58,6 +62,7 @@ export const PresenterFullScreen: React.FC<PresenterFullScreenProps> = ({
         background: alpha ? backdropColor : "#0F172A",
       }}
     >
+      {alpha && backdrop && <PresenterBackdrop spec={backdrop} />}
       {/* Presenter Video */}
       <OffthreadVideo
         src={resolveAsset(src)}

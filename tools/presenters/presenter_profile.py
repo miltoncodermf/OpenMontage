@@ -42,7 +42,7 @@ class PresenterProfileTool(BaseTool):
     agent_skills = ["ffmpeg"]
     install_instructions = "Run the `presenter-onboarding` pipeline once to create and lock a presenter profile."
     capabilities = ["profile_create", "profile_verify", "profile_lock", "recording_validation", "presenter_asset_mint", "raw_guard"]
-    supports = {"operations": ["init", "adopt", "status", "verify", "lock", "validate_recording", "record_raw", "register_raw", "normalize_raw", "fix_permissions", "record_consent", "mint_asset", "check_asset"]}
+    supports = {"operations": ["init", "adopt", "status", "verify", "lock", "validate_recording", "record_raw", "register_raw", "normalize_raw", "fix_permissions", "record_consent", "set_defaults", "mint_asset", "check_asset"]}
     best_for = ["loading the locked presenter profile and guarding that only the beautified twin is ever rendered"]
     not_good_for = ["generating anything (use twin_* tools)"]
 
@@ -51,9 +51,11 @@ class PresenterProfileTool(BaseTool):
         "required": ["operation"],
         "properties": {
             "standin": {"type": "boolean", "default": False, "description": "init only: dev-only fictional stand-in profile; its assets can never pass final_review"},
-            "operation": {"type": "string", "enum": ["init", "adopt", "status", "verify", "lock", "validate_recording", "record_raw", "register_raw", "normalize_raw", "fix_permissions", "record_consent", "mint_asset", "check_asset"]},
+            "operation": {"type": "string", "enum": ["init", "adopt", "status", "verify", "lock", "validate_recording", "record_raw", "register_raw", "normalize_raw", "fix_permissions", "record_consent", "set_defaults", "mint_asset", "check_asset"]},
             "filename": {"type": "string", "description": "register_raw: file name already inside raw/"},
             "statement": {"type": "string", "description": "record_consent: what the owner agreed to"},
+            "hairstyle": {"type": "string", "description": "set_defaults: hair catalog id, or 'current'"},
+            "background": {"type": "string", "description": "set_defaults: background catalog id"},
             "likeness_consent": {"type": "boolean", "description": "record_consent: only true when the owner said yes"},
             "profile_id": {"type": "string"},
             "display_name": {"type": "string"},
@@ -92,6 +94,9 @@ class PresenterProfileTool(BaseTool):
             if op == "record_consent":
                 return ToolResult(success=True, data=pp.record_consent(
                     inputs["profile_id"], likeness_consent=bool(inputs.get("likeness_consent")), statement=inputs.get("statement", "")))
+            if op == "set_defaults":
+                return ToolResult(success=True, data=pp.set_defaults(
+                    inputs["profile_id"], hairstyle=inputs.get("hairstyle"), background=inputs.get("background")))
             if op == "status":
                 prof = pp.read_profile(inputs["profile_id"])
                 return ToolResult(success=True, data={"locked": prof["locked"], "profile": prof,

@@ -250,6 +250,49 @@ def record_consent(profile_id: str, *, likeness_consent: bool, statement: str, r
     return prof["owner_consent"]
 
 
+def set_defaults(profile_id: str, *, hairstyle: str | None = None, background: str | None = None) -> dict[str, Any]:
+    """Record the owner's default hairstyle and background (ids must exist in the profile's catalogs).
+
+    ``hairstyle='current'`` means the locked canonical's own hair. The other catalog entries stay selectable.
+    """
+    import json as _json
+
+    d = profile_dir(profile_id)
+    prof = read_profile(profile_id)
+    ident = prof.setdefault("identity", {})
+    defaults = dict(ident.get("defaults") or {})
+    if hairstyle is not None:
+        cat = d / "identity" / "hair_catalog.json"
+        ids = [h["id"] for h in _json.loads(cat.read_text())] if cat.is_file() else []
+        if hairstyle != "current" and hairstyle not in ids:
+            raise ProfileError(f"hairstyle {hairstyle!r} is not in identity/hair_catalog.json; have {ids}")
+        defaults["hairstyle"] = hairstyle
+    if background is not None:
+        cat = d / "backgrounds" / "backgrounds_catalog.json"
+        ids = [b["id"] for b in _json.loads(cat.read_text())] if cat.is_file() else []
+        if background not in ids:
+            raise ProfileError(f"background {background!r} is not in backgrounds/backgrounds_catalog.json; have {ids}")
+        defaults["background"] = background
+    ident["defaults"] = defaults
+    write_profile(d, prof)
+    return defaults
+
+
+def default_portrait(profile_id: str) -> Path:
+    """Portrait image of the default hairstyle (the canonical itself when the default is 'current')."""
+    d = profile_dir(profile_id)
+    ident = read_profile(profile_id).get("identity") or {}
+    hair = (ident.get("defaults") or {}).get("hairstyle", "current")
+    if hair == "current":
+        return d / ident["canonical"]
+    import json as _json
+
+    for h in _json.loads((d / "identity" / "hair_catalog.json").read_text()):
+        if h["id"] == hair:
+            return d / h["image"]
+    raise ProfileError(f"default hairstyle {hair!r} has no catalog entry")
+
+
 def require_consent(profile_id: str) -> None:
     c = read_profile(profile_id).get("owner_consent") or {}
     if not c.get("likeness_consent"):

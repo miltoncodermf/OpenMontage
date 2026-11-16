@@ -109,3 +109,43 @@ def matte_portrait(path: Path, segmenter: Callable[[Image.Image], Image.Image] |
 
         segmenter = default_segmenter()
     return segmenter(Image.open(path).convert("RGB")).convert("RGBA")
+
+
+def get_entry(d: Path, backdrop_id: str) -> dict[str, Any]:
+    for e in _read(d):
+        if e["id"] == backdrop_id:
+            return e
+    raise KeyError(f"background '{backdrop_id}' is not in {d / CATALOG}; have: {[e['id'] for e in _read(d)]}")
+
+
+def remotion_spec(d: Path, backdrop_id: str) -> dict[str, Any]:
+    """The `presenterBackdrop` cut prop for Remotion: a procedural spec (drawn at render time) or a plate path.
+
+    Plates are person-free generated images, not raw footage, so an absolute path into the profile is fine here.
+    """
+    e = get_entry(d, backdrop_id)
+    if e["kind"] == "procedural":
+        return {"kind": "procedural", "id": e["id"], "angle": e.get("angle", 180), "stops": e["stops"],
+                "overlay": e.get("overlay")}
+    img = (d / e["image"]).resolve()
+    if not img.is_file():
+        raise FileNotFoundError(f"plate image for '{backdrop_id}' is missing: {img}")
+    return {"kind": "plate", "id": e["id"], "src": str(img)}
+
+
+def validate_remotion_spec(spec: Any) -> list[str]:
+    """Problems with a `presenterBackdrop` value (empty list = fine). Used by the scene-plan adapter."""
+    if not isinstance(spec, dict):
+        return ["presenter_backdrop must be an object"]
+    kind = spec.get("kind")
+    if kind == "plate":
+        return [] if isinstance(spec.get("src"), str) and spec["src"] else ["plate backdrop needs 'src'"]
+    if kind == "procedural":
+        stops = spec.get("stops")
+        if not (isinstance(stops, list) and len(stops) >= 2 and all(
+                isinstance(s, (list, tuple)) and len(s) == 2 and isinstance(s[1], str) for s in stops)):
+            return ["procedural backdrop needs 'stops': [[pos, '#hex'], ...] (>= 2)"]
+        if spec.get("overlay") not in (None, "grid_glow", "vignette"):
+            return [f"unknown overlay {spec.get('overlay')!r}"]
+        return []
+    return [f"unknown backdrop kind {kind!r} (expected 'procedural' or 'plate')"]

@@ -6,6 +6,7 @@ import {
 } from "remotion";
 import { resolveAsset } from "../lib/resolveAsset";
 import { getLayout, toPx } from "../layouts";
+import { PresenterBackdrop, PresenterBackdropSpec } from "./PresenterBackdrop";
 
 export interface PresenterScreenSplitProps {
   presenterSrc: string;
@@ -14,6 +15,7 @@ export interface PresenterScreenSplitProps {
   splitRatio?: number; // default 0.35 (35% presenter, 65% screen)
   accentColor?: string;
   alpha?: boolean;
+  backdrop?: PresenterBackdropSpec;
   children?: React.ReactNode;
 }
 
@@ -24,6 +26,7 @@ export const PresenterScreenSplit: React.FC<PresenterScreenSplitProps> = ({
   splitRatio = 0.35,
   accentColor = "#22D3EE",
   alpha = false,
+  backdrop,
   children,
 }) => {
   const { fps, width, height } = useVideoConfig();
@@ -44,6 +47,7 @@ export const PresenterScreenSplit: React.FC<PresenterScreenSplitProps> = ({
           backgroundColor: "#0B1120",
         }}
       >
+        {alpha && backdrop && <PresenterBackdrop spec={backdrop} />}
         <OffthreadVideo
           src={resolveAsset(presenterSrc)}
           startFrom={Math.round(startFrom * fps)}

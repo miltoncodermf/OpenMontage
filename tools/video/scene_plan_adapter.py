@@ -205,6 +205,14 @@ class ScenePlanAdapter:
                     cut["presenterAlpha"] = bool(presenter_is_alpha)
                     cut["presenterVideo"] = presenter_path
                     cut["presenterStartFrom"] = 0.0
+                    # Owner's background catalog entry (lib.backdrops.remotion_spec): beat overrides plan default.
+                    bd = beat.get("presenter_backdrop") or plan_v2.get("presenter_backdrop")
+                    if bd and presenter_is_alpha:
+                        from lib.backdrops import validate_remotion_spec
+                        bad_bd = validate_remotion_spec(bd)
+                        if bad_bd:
+                            raise ValueError(f"beat '{beat_id}': {'; '.join(bad_bd)}")
+                        cut["presenterBackdrop"] = bd
                     if pip_requested:
                         cut["presenterPip"] = True
                         cut["presenterLabel"] = "Presenter"
