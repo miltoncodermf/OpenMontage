@@ -3367,3 +3367,29 @@ class TestLockedChatterboxVoice:
         assert res.success, res.error
         assert res.data["model"] == "chatterbox/c2_owner50" and res.data["duration_s"] == 3.0 and res.data["speed"] == 0.95
         assert res.data["timestamps"] and res.data["timestamps"][-1]["endMs"] <= 3000.0 + 1
+
+
+class TestLockCoversCoreNotDerivedCaches:
+    def test_variants_created_after_the_lock_do_not_break_verify_but_core_edits_do(self, profile_root):
+        from PIL import Image
+        from lib import presenter_profile as pp
+
+        d = pp.create_profile("ming")
+        Image.new("RGB", (8, 8)).save(d / "identity" / "canonical.png")
+        (d / "voice").mkdir(exist_ok=True)
+        (d / "voice" / "voice_profile.json").write_text("{}")
+        prof = pp.read_profile("ming")
+        prof["identity"] = {"canonical": "identity/canonical.png"}
+        prof["voice"] = {"profile": "voice/voice_profile.json"}
+        pp.write_profile(d, prof)
+        locked = pp.lock_profile("ming")
+        assert "identity/canonical.png" in locked["files"] and "loops/x/idle.mp4" not in locked["files"]
+        for rel in ("loops/outfit_a/idle.mp4", "performance/clip.mp4", "identity/wardrobe/blazer.png", "identity/wardrobe_catalog.json"):
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_bytes(b"derived")
+        assert pp.verify_profile("ming") == []  # outfits/loops added after the lock are fine
+        (d / "identity" / "extra.png").write_bytes(b"x")  # a new core file is not
+        assert any("unrecorded file identity/extra.png" in p for p in pp.verify_profile("ming"))
+        (d / "identity" / "extra.png").unlink()
+        (d / "voice" / "voice_profile.json").write_text('{"changed": 1}')
+        assert any("hash mismatch voice/voice_profile.json" in p for p in pp.verify_profile("ming"))

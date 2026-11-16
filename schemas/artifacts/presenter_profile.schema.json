@@ -61,9 +61,10 @@
       }
     },
     "engine_default": { "type": "string", "enum": ["hybrid", "local"], "description": "Twin engine default chosen after the P5 bake-off." },
+    "mutable_caches": { "type": "array", "items": { "type": "string" }, "description": "Path prefixes of derived caches (outfits, idle loops, performance clips) that grow after the lock and are not in the manifest" },
     "files": {
       "type": "object",
-      "description": "relative path -> sha256 of every file in the profile except profile.json",
+      "description": "relative path -> sha256 of every file in the profile except profile.json and the mutable caches",
       "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
     }
   },

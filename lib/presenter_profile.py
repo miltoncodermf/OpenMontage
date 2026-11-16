@@ -121,11 +121,23 @@ def write_profile(d: Path, data: dict[str, Any]) -> None:
     os.chmod(f, 0o600)
 
 
+# Derived caches generated from the locked core (per-tutorial outfits, idle loops, motion/performance clips). The core
+# (raw recordings, refs, canonical, hair/background catalogs and plates, voice) is hashed and frozen; these grow after the
+# lock and are never part of the manifest. Everything in them is derived from, and checked against, the locked canonical.
+MUTABLE_CACHES = ("loops/", "performance/", "identity/wardrobe/", "identity/wardrobe_catalog.json", "derived/")
+
+
+def is_mutable_cache(rel: str) -> bool:
+    return any(rel == c or rel.startswith(c) for c in MUTABLE_CACHES)
+
+
 def file_hashes(d: Path) -> dict[str, str]:
     out = {}
     for p in sorted(d.rglob("*")):
         if p.is_file() and p.name not in ("profile.json", ".DS_Store") and not p.is_symlink():
-            out[p.relative_to(d).as_posix()] = sha256_file(p)
+            rel = p.relative_to(d).as_posix()
+            if not is_mutable_cache(rel):
+                out[rel] = sha256_file(p)
     return out
 
 
@@ -141,6 +153,7 @@ def lock_profile(profile_id: str) -> dict[str, Any]:
     ident["identity_transform"] = "beautified"
     prof["identity"] = ident
     prof["files"] = file_hashes(d)
+    prof["mutable_caches"] = list(MUTABLE_CACHES)
     prof["locked"] = True
     prof["locked_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     write_profile(d, prof)
