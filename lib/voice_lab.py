@@ -127,7 +127,7 @@ def write_candidates_page(out_dir: Path, candidates: list[dict[str, Any]], title
         else:
             player = f'<em>unavailable — {html.escape(str(c.get("reason", "")))}</em>'
         rows.append(
-            f'<section><h2>{html.escape(c["id"])}</h2>{player}'
+            f'<section><h2>{("Voice %s — " % c["n"]) if c.get("n") else ""}{html.escape(c["id"])}</h2>{player}'
             f'<pre>{html.escape(json.dumps(c["recipe"], indent=2))}</pre></section>'
         )
     page = (
@@ -159,10 +159,143 @@ def build_voice_profile(candidate: dict[str, Any], *, model_version: str, seed: 
     return prof
 
 
+def pick_reference_window(y: Any, sr: int, seconds: float = 10.0) -> tuple[float, dict[str, Any]]:
+    """Start time (s) of the cleanest continuous-speech window of ``seconds`` in a long read.
+
+    Chatterbox only conditions on the first ~10 s of a reference clip, so handing it a 3-minute file means it
+    hears whatever the recording starts with (silence, a breath, "okay, ready"). Score = share of voiced frames,
+    minus a penalty for the longest pause, and windows that clip are excluded.
+    """
+    import numpy as np
+
+    hop = max(1, int(sr * 0.02))
+    n = (len(y) - 1024) // hop
+    rms = np.array([np.sqrt(np.mean(y[i * hop:i * hop + 1024] ** 2) + 1e-12) for i in range(max(n, 1))])
+    db = 20 * np.log10(rms + 1e-9)
+    voiced = db > np.percentile(db, 10) + 12
+    fps = sr / hop
+    w = int(seconds * fps)
+    if len(db) <= w:
+        return 0.0, {"voiced": float(voiced.mean()), "longest_pause_s": 0.0}
+    best: tuple[float, int, float, float] | None = None
+    for i in range(0, len(db) - w, max(1, int(fps / 2))):
+        seg = voiced[i:i + w]
+        gap = run = 0
+        for b in seg:
+            run = 0 if b else run + 1
+            gap = max(gap, run)
+        a, b_ = int(i / fps * sr), int((i + w) / fps * sr)
+        if float(np.abs(y[a:b_]).max()) > 0.95:
+            continue
+        score = float(seg.mean()) - 0.2 * (gap / fps)
+        if best is None or score > best[0]:
+            best = (score, i, float(seg.mean()), gap / fps)
+    if best is None:
+        return 0.0, {"voiced": 0.0, "longest_pause_s": 0.0, "note": "every window clips; using the start"}
+    return best[1] / fps, {"voiced": round(best[2], 3), "longest_pause_s": round(best[3], 2)}
+
+
+def make_voice_reference(raw: Path, dst: Path, seconds: float = 10.0) -> dict[str, Any]:
+    """Cut the cleanest ``seconds`` of the owner's voice read into a mono 24 kHz wav (loudness-levelled).
+
+    It is still the owner's raw voice: it lives under ``raw/working/`` of the private profile, is never published,
+    and is only a reference for local synthesis.
+    """
+    import tempfile
+
+    import librosa
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as td:
+        mono = Path(td) / "mono.wav"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw), "-ac", "1", "-ar", "24000", str(mono)],
+                       check=True, timeout=300)
+        y, sr = librosa.load(str(mono), sr=24000)
+        start, info = pick_reference_window(y, sr, seconds)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{start:.2f}", "-t", f"{seconds:.2f}", "-i", str(mono),
+                        "-af", "highpass=f=70,loudnorm=I=-20:TP=-2:LRA=7", "-ar", "24000", "-ac", "1", str(dst)],
+                       check=True, timeout=120)
+    dst.chmod(0o600)
+    return {"file": dst.name, "start_s": round(start, 2), "seconds": seconds, **info}
+
+
 def _words(text: str) -> list[str]:
     import re
 
     return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def write_listening_pack(cdir: Path, ordered: list[tuple[str, Path]], announce: Any) -> dict[str, str]:
+    """Phone/Mac-friendly audio: ``all_candidates.m4a`` (spoken "Voice N", then the sample, N = 1..) and one m4a per voice.
+
+    ``announce(text) -> (float32 array, sample_rate)`` makes the neutral spoken number labels. Numbers follow ``ordered``.
+    """
+    import numpy as np
+    import soundfile as sf
+
+    out: dict[str, str] = {}
+    parts: list[Path] = []
+    for n, (cid, wav) in enumerate(ordered, 1):
+        m4a = cdir / f"{n}_{cid}.m4a"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-c:a", "aac", "-b:a", "128k", str(m4a)], check=True, timeout=120)
+        m4a.chmod(0o600)
+        out[cid] = m4a.name
+        lab, lsr = announce(f"Voice {n}.")
+        lab_p = cdir / f".label_{n}.wav"
+        sf.write(str(lab_p), np.concatenate([np.asarray(lab, dtype="float32"), np.zeros(int(0.5 * lsr), dtype="float32")]), int(lsr))
+        parts += [lab_p, wav]
+    lst = cdir / ".concat.txt"
+    inputs: list[str] = []
+    filt = []
+    for i, p_ in enumerate(parts):
+        inputs += ["-i", str(p_)]
+        filt.append(f"[{i}:a]aresample=48000,aformat=channel_layouts=mono[a{i}]")
+    chain = "".join(f"[a{i}]" for i in range(len(parts)))
+    allp = cdir / "all_candidates.m4a"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *inputs, "-filter_complex", ";".join(filt) + f";{chain}concat=n={len(parts)}:v=0:a=1[o]",
+                    "-map", "[o]", "-c:a", "aac", "-b:a", "128k", str(allp)], check=True, timeout=300)
+    allp.chmod(0o600)
+    for p_ in parts[::2]:
+        p_.unlink(missing_ok=True)
+    lst.unlink(missing_ok=True)
+    out["_all"] = allp.name
+    return out
+
+
+def split_sentences(text: str) -> list[str]:
+    import re
+
+    return [p.strip() for p in re.split(r"(?<=[.!?])\s+", text.strip()) if p.strip()]
+
+
+def chunk_ok(target: str, heard: str, coverage: float, min_coverage: float = 0.85) -> bool:
+    """A sentence is complete when most words are recovered AND its ending was actually spoken.
+
+    Early-EOS truncation drops the tail, so besides coverage at least one of the last two target words must
+    appear among the last few heard words.
+    """
+    tail = _words(target)[-2:]
+    heard_tail = _words(heard)[-4:]
+    return coverage >= min_coverage and any(w in heard_tail for w in tail)
+
+
+def assemble_chunks(paths: list[Path], dst: Path, gap_s: float = 0.16) -> float:
+    """Concatenate per-sentence wavs with a short pause; returns the duration in seconds."""
+    import numpy as np
+    import soundfile as sf
+
+    parts, sr = [], None
+    for p in paths:
+        a, r = sf.read(str(p), dtype="float32")
+        if a.ndim > 1:
+            a = a.mean(axis=1)
+        sr = sr or r
+        if r != sr:
+            raise ValueError("chunks have different sample rates")
+        parts += [a, np.zeros(int(gap_s * r), dtype="float32")]
+    out = np.concatenate(parts[:-1]) if parts else np.zeros(1, dtype="float32")
+    sf.write(str(dst), out, sr)
+    return round(len(out) / sr, 2)
 
 
 def asr_coverage(wav: Path, text: str, model_size: str = "base") -> dict[str, Any]:

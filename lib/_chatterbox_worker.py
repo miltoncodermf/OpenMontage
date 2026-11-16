@@ -52,6 +52,15 @@ def main() -> None:
 
     out_dir = Path(spec["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Synthesis is done per SENTENCE (one `generate` call each, chatterbox's own chunking off) so the caller can
+    # ASR-check each sentence and re-roll only the one that stopped early (EOS before the last words).
+    sentences = spec.get("sentences") or [spec["text"]]
+    only = set(spec.get("only") or [])  # "candidate_id:idx" pairs to (re)generate; empty = everything
+    seeds = spec.get("seeds") or {}
+    try:
+        import mlx.core as mx
+    except ImportError:  # pragma: no cover
+        mx = None
     for cand in spec["candidates"]:
         ws = [cand["owner_weight"]] + [d["weight"] for d in cand["donors"]]
         total = sum(ws)
@@ -63,14 +72,24 @@ def main() -> None:
         c.gen["embedding"] = _blend(xvs, ws).to(base_gen_embedding.device).to(base_gen_embedding.dtype)
         tts._cached_t3_cond_mx = None
         tts._cached_cond_hash = None
-        torch.manual_seed(spec.get("seed", 1234))
-        t1 = time.time()
-        wav = tts.generate(spec["text"], exaggeration=cand["exaggeration"], cfg_weight=cand["cfg"], show_progress=False)
-        arr = wav.detach().cpu().numpy().squeeze()
-        raw = out_dir / f"{cand['candidate_id']}.raw.wav"
-        sf.write(str(raw), arr, int(tts.sr))
-        report["candidates"].append({"candidate_id": cand["candidate_id"], "raw": str(raw), "sr": int(tts.sr), "weights": ws,
-                                     "seconds": round(time.time() - t1, 1), "audio_s": round(len(arr) / tts.sr, 2)})
+        chunks = []
+        for idx, sentence in enumerate(sentences):
+            key = f"{cand['candidate_id']}:{idx}"
+            if only and key not in only:
+                continue
+            seed = int(seeds.get(key, spec.get("seed", 1234) + idx))
+            torch.manual_seed(seed)
+            if mx is not None:
+                mx.random.seed(seed)
+            t1 = time.time()
+            wav = tts.generate(sentence, exaggeration=cand["exaggeration"], cfg_weight=cand["cfg"],
+                               use_sentence_chunking=False, show_progress=False)
+            arr = wav.detach().cpu().numpy().squeeze()
+            raw = out_dir / f"{cand['candidate_id']}.{idx}.raw.wav"
+            sf.write(str(raw), arr, int(tts.sr))
+            chunks.append({"idx": idx, "raw": str(raw), "seed": seed, "sr": int(tts.sr), "text": sentence,
+                           "seconds": round(time.time() - t1, 1), "audio_s": round(len(arr) / tts.sr, 2)})
+        report["candidates"].append({"candidate_id": cand["candidate_id"], "sr": int(tts.sr), "weights": ws, "chunks": chunks})
         # reset the owner's base embedding for the next candidate
         tts.conds.t3.speaker_emb = owner_ve.to(c.t3.speaker_emb.device).to(c.t3.speaker_emb.dtype)
     Path(spec["out_json"]).write_text(json.dumps(report, indent=2))

@@ -3205,3 +3205,59 @@ class TestDefaultsAndRemotionBackdrop:
         with pytest.raises(ValueError, match="backdrop"):
             ScenePlanAdapter().compile({**V3_PLAN, "presenter_backdrop": {"kind": "plate"}},
                                        {"assets": [REAL_PRESENTER, REAL_MATTE]}, [], {"s1": 5.0, "s2": 6.0})
+
+
+class TestChatterboxTruncationFix:
+    def test_sentences_split_and_truncated_tail_is_detected(self):
+        from lib import voice_lab as vl
+
+        sents = vl.split_sentences(vl.SAMPLE_PARAGRAPH)
+        assert len(sents) == 3 and sents[0].startswith("Today") and sents[-1].endswith("project.")
+        full = "By the end you will be able to adapt it to your own project"
+        assert vl.chunk_ok(full, full, 1.0)
+        cut = "By the end you will be able to adapt it to"  # early EOS: the ending was never spoken
+        assert not vl.chunk_ok(full, cut, 0.8)
+        assert not vl.chunk_ok(full, cut, 0.9)  # high coverage alone is not enough when the tail is missing
+
+    def test_assemble_chunks_adds_pauses(self, tmp_path):
+        import numpy as np
+        import soundfile as sf
+        from lib import voice_lab as vl
+
+        for i in range(3):
+            sf.write(str(tmp_path / f"{i}.wav"), np.full(2400, 0.1, dtype="float32"), 24000)
+        dur = vl.assemble_chunks([tmp_path / f"{i}.wav" for i in range(3)], tmp_path / "out.wav", gap_s=0.2)
+        assert abs(dur - (3 * 0.1 + 2 * 0.2)) < 0.01
+
+    def test_reference_window_prefers_continuous_speech_over_silence_and_pauses(self):
+        import numpy as np
+        from lib import voice_lab as vl
+
+        sr = 16000
+        rng = np.random.default_rng(0)
+        y = (rng.standard_normal(sr * 40) * 0.001).astype("float32")  # quiet room
+        t = np.arange(sr * 12) / sr
+        y[sr * 22:sr * 34] += (0.2 * np.sin(2 * np.pi * 180 * t) * (0.6 + 0.4 * np.sin(2 * np.pi * 3 * t))).astype("float32")  # 12 s of "speech"
+        start, info = vl.pick_reference_window(y, sr, seconds=10.0)
+        assert 21.0 <= start <= 25.0 and info["voiced"] > 0.9 and info["longest_pause_s"] < 0.5
+
+    def test_runner_forwards_sentences_only_and_seeds(self, monkeypatch, tmp_path):
+        import json
+        from lib import chatterbox_runner as cr
+
+        monkeypatch.setattr(cr, "available", lambda: (True, "ok"))
+        seen = {}
+
+        class P:
+            returncode = 0
+            stderr = stdout = ""
+
+        def fake_run(cmd, **kw):
+            spec = json.loads(open(cmd[-1]).read())
+            seen.update(spec)
+            open(spec["out_json"], "w").write(json.dumps({"candidates": []}))
+            return P()
+
+        monkeypatch.setattr(cr.subprocess, "run", fake_run)
+        cr.synthesize(tmp_path / "o.wav", {}, [], ["A.", "B."], tmp_path / "out", only=["c1:1"], seeds={"c1:1": 7})
+        assert seen["sentences"] == ["A.", "B."] and seen["only"] == ["c1:1"] and seen["seeds"] == {"c1:1": 7}

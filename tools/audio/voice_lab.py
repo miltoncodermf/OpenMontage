@@ -121,6 +121,11 @@ class VoiceLab(BaseTool):
             built.append(rec["candidate_id"])
         raw_voice = next(iter(sorted((d / "raw").glob("voice_read.*"))), None)
         cb_ok = chatterbox_available() and raw_voice is not None
+        if cb_ok:  # Chatterbox only hears ~10 s of reference: hand it the cleanest 10 s of the read, not the whole file
+            ref = d / "raw" / "working" / "voice_ref.wav"
+            if not ref.is_file():
+                vl.make_voice_reference(raw_voice, ref)
+            raw_voice = ref
         reason = (chatterbox_unavailable_reason() if not chatterbox_available() else "raw/voice_read.* missing")
         cb_report = None
         cb_audio: dict[str, str] = {}
@@ -140,6 +145,20 @@ class VoiceLab(BaseTool):
             page_items.append({"id": rec["candidate_id"], "audio": cb_audio[rec["candidate_id"]],
                                "recipe": {**recipe, "asr_coverage": info["asr"]["coverage"], "attempts": info["attempts"], **({"warning": info["warning"]} if info.get("warning") else {})}})
             built.append(rec["candidate_id"])
+        ok_items = [i for i in page_items if i.get("audio")]
+        for n, it in enumerate(ok_items, 1):
+            it["n"] = n
+        pack = {}
+        try:  # phone/Mac listening pack: one numbered m4a per voice + all_candidates.m4a ("Voice 1." sample, "Voice 2." ...)
+            import numpy as _np
+
+            def _announce(text: str):
+                r = tts.generate(text, voice="bf_emma", speed=1.0, sample_rate=24000)
+                return _np.asarray(r.audio, dtype="float32"), 24000
+
+            pack = vl.write_listening_pack(cdir, [(i["id"], cdir / i["audio"]) for i in ok_items], _announce)
+        except Exception as exc:  # noqa: BLE001  (the wavs and the page are still delivered)
+            pack = {"error": str(exc)}
         page = vl.write_candidates_page(cdir, page_items)
         page.chmod(0o600)
         return ToolResult(success=True, data={
@@ -147,14 +166,23 @@ class VoiceLab(BaseTool):
             "chatterbox": ("unavailable — tell the owner before switching engines (spec §5.6/§9): " + reason) if not cb_ok else "built",
             "chatterbox_api": (cb_report or {}).get("api"),
             "candidates": [i["id"] for i in page_items],
+            "listening_pack": pack,
         })
 
     def _chatterbox_candidates(self, d: Path, owner_ref: Path, cdir: Path, tts: Any) -> dict[str, Any]:
-        """Blend the owner's reference embedding with Kokoro donor voices (speaker-embedding interpolation, see worker docs)."""
+        """Blend the owner's reference embedding with Kokoro donor voices (speaker-embedding interpolation, see worker docs).
+
+        Truncation fix: Chatterbox sometimes emits EOS early and drops the end of what it was asked to say. Synthesis is
+        therefore done per sentence; every sentence is ASR-checked (coverage + the sentence ending must be heard) and only
+        a failing sentence is re-rolled (new seed, up to MAX_ATTEMPTS), keeping the best take. The assembled paragraph is
+        then ASR-checked as a whole; a candidate that is still incomplete is labelled with a warning.
+        """
         import subprocess
 
         from lib import chatterbox_runner
 
+        MAX_ATTEMPTS = 4
+        sentences = vl.split_sentences(vl.SAMPLE_PARAGRAPH)
         donors = sorted({dn["voice"] for rec in vl.CHATTERBOX_BLENDS for dn in rec["donors"]})
         with tempfile.TemporaryDirectory() as td:
             donor_refs: dict[str, Path] = {}
@@ -163,40 +191,56 @@ class VoiceLab(BaseTool):
                 p = Path(td) / f"donor_{v}.wav"
                 sf.write(str(p), np.asarray(res.audio, dtype=np.float32), int(res.sample_rate))
                 donor_refs[v] = p
-            rep = chatterbox_runner.synthesize(owner_ref, donor_refs, vl.CHATTERBOX_BLENDS, vl.SAMPLE_PARAGRAPH, Path(td) / "out")
-            # Chatterbox sometimes stops early (EOS) and drops the end of a sentence/paragraph: verify every candidate
-            # with ASR and re-synthesize the failures with a new seed (max 3 attempts), keeping the best attempt.
-            best: dict[str, dict[str, Any]] = {c["candidate_id"]: c for c in rep["candidates"]}
-            for c in best.values():
-                c["asr"] = vl.asr_coverage(Path(c["raw"]), vl.SAMPLE_PARAGRAPH)
-                c["attempts"] = 1
-            for attempt in (2, 3):
-                bad = [cid for cid, c in best.items() if c["asr"]["coverage"] < 0.92]
+            rep = chatterbox_runner.synthesize(owner_ref, donor_refs, vl.CHATTERBOX_BLENDS, sentences, Path(td) / "out")
+            # best take per (candidate, sentence)
+            best: dict[str, dict[str, Any]] = {}
+            for c in rep["candidates"]:
+                for ch in c["chunks"]:
+                    key = f"{c['candidate_id']}:{ch['idx']}"
+                    cov = vl.asr_coverage(Path(ch["raw"]), ch["text"])
+                    best[key] = {**ch, "asr": cov, "attempts": 1, "ok": vl.chunk_ok(ch["text"], cov["heard"], cov["coverage"])}
+            for attempt in range(2, MAX_ATTEMPTS + 1):
+                bad = [k for k, v in best.items() if not v["ok"]]
                 if not bad:
                     break
-                retry = chatterbox_runner.synthesize(owner_ref, donor_refs, [r for r in vl.CHATTERBOX_BLENDS if r["candidate_id"] in bad],
-                                                     vl.SAMPLE_PARAGRAPH, Path(td) / f"out{attempt}", seed=1234 + 101 * attempt)
+                seeds = {k: 1234 + 101 * attempt + int(k.split(":")[1]) for k in bad}
+                retry = chatterbox_runner.synthesize(owner_ref, donor_refs, vl.CHATTERBOX_BLENDS, sentences,
+                                                     Path(td) / f"out{attempt}", only=bad, seeds=seeds)
                 for c in retry["candidates"]:
-                    cov = vl.asr_coverage(Path(c["raw"]), vl.SAMPLE_PARAGRAPH)
-                    if cov["coverage"] > best[c["candidate_id"]]["asr"]["coverage"]:
-                        best[c["candidate_id"]] = {**c, "asr": cov}
-                    best[c["candidate_id"]]["attempts"] = attempt
-            rep["candidates"] = list(best.values())
+                    for ch in c["chunks"]:
+                        key = f"{c['candidate_id']}:{ch['idx']}"
+                        cov = vl.asr_coverage(Path(ch["raw"]), ch["text"])
+                        ok = vl.chunk_ok(ch["text"], cov["heard"], cov["coverage"])
+                        best[key]["attempts"] = attempt
+                        if ok or cov["coverage"] > best[key]["asr"]["coverage"]:
+                            best[key] = {**ch, "asr": cov, "attempts": attempt, "ok": ok}
+            out_cands = []
             for c in rep["candidates"]:
-                raw = Path(c["raw"])
-                final = cdir / f"{c['candidate_id']}.wav"
-                rec = next(r for r in vl.CHATTERBOX_BLENDS if r["candidate_id"] == c["candidate_id"])
+                cid = c["candidate_id"]
+                rec = next(r for r in vl.CHATTERBOX_BLENDS if r["candidate_id"] == cid)
+                keys = [f"{cid}:{i}" for i in range(len(sentences))]
+                raw = Path(td) / f"{cid}.assembled.wav"
+                vl.assemble_chunks([Path(best[k]["raw"]) for k in keys], raw)
                 src = raw
                 if abs(rec.get("pitch_semitones", 0.0)) > 1e-6:  # small pitch shift keeping duration
-                    src = Path(td) / f"{c['candidate_id']}.pitch.wav"
+                    src = Path(td) / f"{cid}.pitch.wav"
                     f = 2 ** (rec["pitch_semitones"] / 12)
                     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw), "-af", f"asetrate={int(c['sr'] * f)},aresample={c['sr']},atempo={1 / f:.6f}", str(src)],
                                    check=True, timeout=120)
+                final = cdir / f"{cid}.wav"
                 vl.polish(src, final)
                 final.chmod(0o600)
-                c["file"] = final.name
-                if c["asr"]["coverage"] < 0.92:
-                    c["warning"] = f"ASR coverage {c['asr']['coverage']} after {c['attempts']} attempts — audio may be truncated"
+                whole = vl.asr_coverage(final, vl.SAMPLE_PARAGRAPH)
+                info = {"candidate_id": cid, "file": final.name, "sr": c["sr"], "weights": c["weights"],
+                        "asr": {"coverage": whole["coverage"]}, "attempts": max(best[k]["attempts"] for k in keys),
+                        "sentence_attempts": [best[k]["attempts"] for k in keys],
+                        "sentences_complete": [bool(best[k]["ok"]) for k in keys]}
+                if whole["coverage"] < 0.92 or not all(info["sentences_complete"]):
+                    bad_i = [i + 1 for i, ok in enumerate(info["sentences_complete"]) if not ok]
+                    info["warning"] = (f"ASR coverage {whole['coverage']} after {info['attempts']} attempts"
+                                       + (f"; sentence(s) {bad_i} may still be cut short" if bad_i else "") + " — audio may be truncated")
+                out_cands.append(info)
+            rep["candidates"] = out_cands
         return rep
 
     def _lock(self, pid: str, candidate: str) -> ToolResult:

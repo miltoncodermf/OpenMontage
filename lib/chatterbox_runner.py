@@ -36,14 +36,16 @@ def available() -> tuple[bool, str]:
     return True, "ok"
 
 
-def synthesize(owner_ref: Path, donor_refs: dict[str, Path], candidates: list[dict[str, Any]], text: str, out_dir: Path,
-               seed: int = 1234, timeout_s: int = 3600) -> dict[str, Any]:
+def synthesize(owner_ref: Path, donor_refs: dict[str, Path], candidates: list[dict[str, Any]], sentences: list[str], out_dir: Path,
+               seed: int = 1234, timeout_s: int = 3600, only: list[str] | None = None,
+               seeds: dict[str, int] | None = None) -> dict[str, Any]:
+    """One wav per (candidate, sentence). ``only`` = ["cand:idx", ...] re-generates just those, with ``seeds`` overrides."""
     ok, why = available()
     if not ok:
         raise RuntimeError(why)
     with tempfile.TemporaryDirectory() as td:
         spec = {"owner_ref": str(owner_ref), "donor_refs": {k: str(v) for k, v in donor_refs.items()}, "candidates": candidates,
-                "text": text, "out_dir": str(out_dir), "seed": seed, "out_json": str(Path(td) / "report.json")}
+                "sentences": sentences, "only": only or [], "seeds": seeds or {}, "out_dir": str(out_dir), "seed": seed, "out_json": str(Path(td) / "report.json")}
         sp = Path(td) / "spec.json"
         sp.write_text(json.dumps(spec))
         env = {**os.environ, "HF_HOME": str(hf_home()), "PYTORCH_ENABLE_MPS_FALLBACK": "1"}
