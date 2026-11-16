@@ -20,7 +20,7 @@ import numpy as np
 from PIL import Image
 
 from lib import presenter_profile as pp
-from lib.twin_prompts import beautify_prompt, wardrobe_prompt
+from lib.twin_prompts import beautify_prompt, hairstyle_prompt, plate_prompt, wardrobe_prompt
 from tools.base_tool import (
     BaseTool,
     Determinism,
@@ -90,15 +90,15 @@ class TwinIdentity(BaseTool):
         "(Apache-2.0) for face detection. Set ALLOW_PAID_APIS=true only for an approved run."
     )
     fallback_tools: list[str] = []
-    capabilities = ["extract_stills", "beautify_portrait", "wardrobe_variant", "pick_canonical", "standin_portrait"]
-    supports = {"operations": ["extract_stills", "beautify", "wardrobe", "pick_canonical", "standin_portrait"], "license_note": "MediaPipe Apache-2.0; no InsightFace weights"}
+    capabilities = ["extract_stills", "beautify_portrait", "wardrobe_variant", "hairstyle_variant", "background_plate", "pick_canonical", "standin_portrait"]
+    supports = {"operations": ["extract_stills", "beautify", "wardrobe", "hairstyle", "background_plate", "pick_canonical", "standin_portrait"], "license_note": "MediaPipe Apache-2.0; no InsightFace weights"}
     best_for = ["building and extending the owner's beautified identity from his own stills"]
     not_good_for = ["rendering raw owner footage (never allowed)"]
     input_schema = {
         "type": "object",
         "required": ["operation", "profile_id"],
         "properties": {
-            "operation": {"type": "string", "enum": ["extract_stills", "beautify", "wardrobe", "pick_canonical", "standin_portrait"]},
+            "operation": {"type": "string", "enum": ["extract_stills", "beautify", "wardrobe", "hairstyle", "background_plate", "pick_canonical", "standin_portrait"]},
             "profile_id": {"type": "string"},
             "count": {"type": "integer", "default": 5},
             "model": {"type": "string", "default": DEFAULT_IMAGE_MODEL},
@@ -108,6 +108,8 @@ class TwinIdentity(BaseTool):
             "tags": {"type": "array", "items": {"type": "string"}},
             "hair": {"type": "string"},
             "candidate": {"type": "string"},
+            "scene": {"type": "string", "description": "background_plate: what the empty plate shows"},
+            "resolution": {"type": "string", "enum": ["1K", "2K", "4K"], "description": "background_plate: output size (default 2K)"},
             "strength": {"type": "string", "enum": ["subtle", "strong", "very_strong"], "default": "subtle"},
             "start_index": {"type": "integer", "default": 0, "description": "beautify: first candidate number minus one, so rounds do not overwrite each other"},
             "approved_total_usd": {"type": "number", "description": "Owner-approved total for this paid batch; calls stop at 1.2x (lib/paid_call_guard)"},
@@ -130,7 +132,7 @@ class TwinIdentity(BaseTool):
         from lib.gemini_image_pricing import estimate_calls_usd
 
         op = inputs.get("operation")
-        n = int(inputs.get("count", 5)) if op == "beautify" else 1 if op == "wardrobe" else 0
+        n = int(inputs.get("count", 5)) if op == "beautify" else 1 if op in ("wardrobe", "hairstyle", "background_plate") else 0
         return estimate_calls_usd(inputs.get("model", DEFAULT_IMAGE_MODEL), n, inputs.get("resolution", "1K"))
 
     # ------------------------------------------------------------------
@@ -158,6 +160,10 @@ class TwinIdentity(BaseTool):
                 return self._beautify(d, pid, inputs)
             if op == "wardrobe":
                 return self._wardrobe(d, pid, inputs)
+            if op == "hairstyle":
+                return self._hairstyle(d, pid, inputs)
+            if op == "background_plate":
+                return self._background_plate(d, pid, inputs)
             if op == "pick_canonical":
                 return self._pick(d, pid, inputs)
             if op == "standin_portrait":
@@ -239,7 +245,7 @@ class TwinIdentity(BaseTool):
         p = Path(inputs["spend_ledger"])
         return p, (json.loads(p.read_text()) if p.is_file() else [])
 
-    def _budget_problem(self, inputs: dict[str, Any], model: str, n: int) -> str | None:
+    def _budget_problem(self, inputs: dict[str, Any], model: str, n: int, resolution: str = "1K") -> str | None:
         from lib.paid_call_guard import OVERRUN_FACTOR
 
         approved = inputs.get("approved_total_usd")
@@ -247,17 +253,17 @@ class TwinIdentity(BaseTool):
             return None
         _, entries = self._ledger(inputs)
         spent = sum(float(e.get("usd", 0)) for e in entries)
-        nxt = self.estimate_cost({"operation": "wardrobe", "model": model}) * n
+        nxt = self.estimate_cost({"operation": "wardrobe", "model": model, "resolution": resolution}) * n
         if spent + nxt > float(approved) * OVERRUN_FACTOR + 1e-9:
             return (f"budget guard: spent ${spent:.3f} + next ${nxt:.3f} would exceed 1.2x the approved ${float(approved):.3f} "
                     f"(${float(approved) * OVERRUN_FACTOR:.3f}); stop and ask the owner")
         return None
 
-    def _ledger_add(self, inputs: dict[str, Any], op: str, model: str, label: str, reported: float | None) -> None:
+    def _ledger_add(self, inputs: dict[str, Any], op: str, model: str, label: str, reported: float | None, resolution: str = "1K") -> None:
         p, entries = self._ledger(inputs)
         if p is None:
             return
-        est = self.estimate_cost({"operation": "wardrobe", "model": model})
+        est = self.estimate_cost({"operation": "wardrobe", "model": model, "resolution": resolution})
         entries.append({"op": op, "model": model, "label": label, "usd": est, "reported_usd": reported,
                         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
         p.write_text(json.dumps(entries, indent=2))
@@ -327,6 +333,60 @@ class TwinIdentity(BaseTool):
         cat_path.write_text(json.dumps(catalog, indent=2))
         cat_path.chmod(0o600)
         return ToolResult(success=True, data={"variant": vid, "image": str(out), "catalog_size": len(catalog)})
+
+    def _hairstyle(self, d: Path, pid: str, inputs: dict[str, Any]) -> ToolResult:
+        """Hair-only edit of the LOCKED canonical portrait → identity/hair/<id>.png + hair_catalog.json."""
+        blocked = self._guard_paid(inputs) or self._consent_problem(pid)
+        canonical = d / "identity" / "canonical.png"
+        if not blocked and not canonical.is_file():
+            blocked = "identity/canonical.png not set — pick a canonical first"
+        vid, desc = inputs.get("variant_id"), inputs.get("description")
+        if not blocked and (not vid or not desc):
+            blocked = "variant_id and description are required"
+        model = inputs.get("model", DEFAULT_IMAGE_MODEL)
+        blocked = blocked or self._budget_problem(inputs, model, 1)
+        if blocked:
+            return ToolResult(success=False, error=blocked)
+        out = d / "identity" / "hair" / f"{vid}.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        res = self._call_image(d, hairstyle_prompt(desc), [canonical], out, model)
+        if not res.success:
+            return ToolResult(success=False, error=res.error)
+        self._ledger_add(inputs, "hairstyle", model, out.name, res.cost_usd)
+        cat_path = d / "identity" / "hair_catalog.json"
+        catalog = json.loads(cat_path.read_text()) if cat_path.is_file() else []
+        catalog = [c for c in catalog if c["id"] != vid]
+        catalog.append({"id": vid, "description": desc, "prompt": hairstyle_prompt(desc), "image": out.relative_to(d).as_posix(),
+                        "model": model, "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        cat_path.write_text(json.dumps(catalog, indent=2))
+        cat_path.chmod(0o600)
+        return ToolResult(success=True, data={"variant": vid, "image": str(out), "catalog_size": len(catalog)})
+
+    def _background_plate(self, d: Path, pid: str, inputs: dict[str, Any]) -> ToolResult:
+        """Person-free 16:9 plate (no reference photo of the owner is sent) → backgrounds/<id>.png (+ catalog entry)."""
+        blocked = self._guard_paid(inputs)
+        vid, scene = inputs.get("variant_id"), inputs.get("scene")
+        if not blocked and (not vid or not scene):
+            blocked = "variant_id and scene are required"
+        model = inputs.get("model", DEFAULT_IMAGE_MODEL)
+        res_label = inputs.get("resolution", "2K")
+        blocked = blocked or self._budget_problem(inputs, model, 1, res_label)
+        if blocked:
+            return ToolResult(success=False, error=blocked)
+        out = d / "backgrounds" / f"{vid}.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        res = self._imagen().execute({"prompt": plate_prompt(scene), "model": model, "output_path": str(out),
+                                      "aspect_ratio": "16:9", "resolution": res_label})
+        if not res.success:
+            return ToolResult(success=False, error=res.error)
+        _ensure_real_png(out)
+        out.chmod(0o600)
+        self._ledger_add(inputs, "background_plate", model, out.name, res.cost_usd, res_label)
+        from lib import backdrops
+
+        backdrops.upsert(d, {"id": vid, "kind": "plate", "label": inputs.get("label", vid), "image": out.relative_to(d).as_posix(),
+                             "scene": scene, "model": model, "safe_region": backdrops.SAFE_REGION, "cost": "generated plate"})
+        return ToolResult(success=True, data={"variant": vid, "image": str(out)})
 
     def _standin_portrait(self, d: Path, pid: str, inputs: dict[str, Any]) -> ToolResult:
         """Generate a FICTIONAL portrait for a stand-in profile (dev only; never a real person's likeness)."""

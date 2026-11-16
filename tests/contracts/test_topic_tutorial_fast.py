@@ -3050,3 +3050,96 @@ class TestStrongerIdentity:
         import lib.presenter_qa as qa, lib.presenter_guard as pg
         src = Path(qa.__file__).read_text() + Path(pg.__file__).read_text()
         assert "embedding" not in src and "similarity" not in src  # no face-resemblance gate exists
+
+
+class TestHairstylesAndBackgrounds:
+    def _tool(self, profile_root, monkeypatch, tmp_path):
+        from PIL import Image
+        from lib import presenter_profile as pp
+        from tools.base_tool import ToolResult
+        from tools.presenters.twin_identity import TwinIdentity
+
+        d = pp.create_profile("ming")
+        pp.record_consent("ming", likeness_consent=True, statement="test")
+        Image.new("RGB", (64, 36), "gray").save(d / "identity" / "canonical.png")
+        monkeypatch.setenv("ALLOW_PAID_APIS", "true")
+        seen = []
+
+        class Fake:
+            def execute(self, inp):
+                seen.append(inp)
+                Image.new("RGB", (64, 36), "white").save(inp["output_path"], format="JPEG")  # Gemini returns JPEG bytes
+                return ToolResult(success=True)
+
+        t = TwinIdentity()
+        monkeypatch.setattr(t, "_imagen", lambda: Fake())
+        base = {"profile_id": "ming", "paid_call_approved": True, "model": "gemini-3-pro-image",
+                "spend_ledger": str(tmp_path / "l.json"), "approved_total_usd": 0.576}
+        return d, t, base, seen
+
+    def test_hairstyle_edits_canonical_only_and_catalogues(self, profile_root, monkeypatch, tmp_path):
+        import json
+        from PIL import Image
+        from lib.twin_prompts import HAIRSTYLES
+
+        d, t, base, seen = self._tool(profile_root, monkeypatch, tmp_path)
+        for h in HAIRSTYLES:
+            r = t.execute({**base, "operation": "hairstyle", "variant_id": h["id"], "description": h["description"]})
+            assert r.success, r.error
+        assert all(s["image_paths"] == [str(d / "identity" / "canonical.png")] for s in seen)  # never the raw stills
+        assert "change ONLY the hairstyle" in seen[0]["prompt"] and "face" in seen[0]["prompt"]
+        assert Image.open(d / "identity" / "hair" / "hair_close_crop.png").format == "PNG"
+        assert [c["id"] for c in json.loads((d / "identity" / "hair_catalog.json").read_text())] == [h["id"] for h in HAIRSTYLES]
+        over = t.execute({**base, "operation": "hairstyle", "variant_id": "x", "description": "y"})  # 4 x 0.144 = 0.576 spent; 1.2x = 0.6912
+        assert over.success is False and "budget guard" in over.error
+
+    def test_background_plate_sends_no_person_reference_and_uses_2k(self, profile_root, monkeypatch, tmp_path):
+        import json
+        from lib.twin_prompts import BACKGROUND_PLATES
+
+        d, t, base, seen = self._tool(profile_root, monkeypatch, tmp_path)
+        b = BACKGROUND_PLATES[0]
+        r = t.execute({**base, "operation": "background_plate", "variant_id": b["id"], "scene": b["scene"], "label": b["label"]})
+        assert r.success, r.error
+        assert "image_paths" not in seen[0] and seen[0]["resolution"] == "2K" and seen[0]["aspect_ratio"] == "16:9"
+        assert "NO person" in seen[0]["prompt"] and "9:16" in seen[0]["prompt"]
+        cat = json.loads((d / "backgrounds" / "backgrounds_catalog.json").read_text())
+        assert cat[0]["kind"] == "plate" and cat[0]["safe_region"]["vertical_crop_9x16_x"]
+
+    def test_procedural_backdrops_are_free_deterministic_and_composite_behind_alpha(self, profile_root):
+        import numpy as np
+        from PIL import Image
+        from lib import backdrops as bd
+        from lib import presenter_profile as pp
+
+        d = pp.create_profile("ming")
+        cat = bd.install_procedural(d)
+        assert {c["id"] for c in cat} == {"bg_soft_gradient", "bg_dark_tech", "bg_clean_light"} and all(c["cost"] == "$0" for c in cat)
+        a, b = bd.render_procedural(bd.PROCEDURAL[1], (160, 90)), bd.render_procedural(bd.PROCEDURAL[1], (160, 90))
+        assert np.array_equal(np.asarray(a), np.asarray(b))
+        fg = Image.new("RGBA", (160, 90), (0, 0, 0, 0))
+        fg.paste((255, 0, 0, 255), (60, 0, 100, 90))  # opaque red strip in the middle
+        out = np.asarray(bd.composite(fg, a))
+        assert tuple(out[45, 80]) == (255, 0, 0) and tuple(out[45, 5]) == tuple(np.asarray(a)[45, 5])
+
+    def test_variant_consistency_uses_canonical_not_raw(self, monkeypatch):
+        import numpy as np
+        from PIL import Image
+        from lib import face_tools, presenter_qa as qa
+
+        base = np.random.default_rng(1).random((478, 3)).astype(np.float32)
+        faces = {"same": base + 0.0005, "other": base + np.random.default_rng(2).random((478, 3)).astype(np.float32) * 0.2}
+        cur = {}
+        monkeypatch.setattr(face_tools, "face_landmarks", lambda img: cur[img.info["k"]])
+        mk = lambda k: _info_img(k)
+        cur.update(faces); cur["base"] = base
+        assert qa.check_variant_consistency(mk("base"), mk("same"))["passed"] is True
+        assert qa.check_variant_consistency(mk("base"), mk("other"))["passed"] is False
+
+
+def _info_img(key):
+    from PIL import Image
+
+    im = Image.new("RGB", (8, 8))
+    im.info["k"] = key
+    return im

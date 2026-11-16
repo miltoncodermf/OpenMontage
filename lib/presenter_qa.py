@@ -162,3 +162,34 @@ def presenter_qa_report(asset: dict[str, Any], clip: Path, audio: Path, fps: flo
     return {"checks": checks, "failed": failed, "not_run": not_run,
             "passed": not failed and not not_run,  # "not run" never counts as a pass
             "verdict": "fail" if failed else ("incomplete" if not_run else "pass")}
+
+
+def landmark_signature(img: Image.Image) -> np.ndarray | None:
+    """Scale/translation-normalised face-mesh geometry (x, y of every landmark), or None when no face is found."""
+    from lib import face_tools
+
+    lm = face_tools.face_landmarks(img)
+    if lm is None:
+        return None
+    pts = np.asarray(lm, dtype=np.float32)[:, :2]
+    pts = pts - pts.mean(axis=0)
+    return pts / max(float(np.sqrt((pts ** 2).sum(axis=1).mean())), 1e-6)
+
+
+def landmark_distance(a: Image.Image, b: Image.Image) -> float | None:
+    """Mean per-landmark distance between two faces (0 = same geometry). Used only to keep the *locked twin*
+    consistent across hairstyles/outfits (canonical vs its own variants) — never against the owner's raw footage."""
+    sa, sb = landmark_signature(a), landmark_signature(b)
+    if sa is None or sb is None:
+        return None
+    return float(np.linalg.norm(sa - sb, axis=1).mean())
+
+
+MAX_VARIANT_LANDMARK_DISTANCE = 0.015  # measured: hairstyle edits of one portrait 0.005-0.012; other candidates 0.017-0.040
+
+
+def check_variant_consistency(canonical: Image.Image, variant: Image.Image, max_distance: float = MAX_VARIANT_LANDMARK_DISTANCE) -> dict[str, Any]:
+    dist = landmark_distance(canonical, variant)
+    if dist is None:
+        return {"status": "not_run", "passed": None, "reason": "no face found in one of the images"}
+    return {"status": "run", "passed": dist <= max_distance, "landmark_distance": round(dist, 4), "threshold": max_distance}

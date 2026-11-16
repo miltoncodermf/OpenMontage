@@ -94,3 +94,43 @@ STANDIN_PORTRAIT_PROMPT = (
 
 def standin_portrait_prompt(index: int = 0) -> str:
     return STANDIN_PORTRAIT_PROMPT.format(variation=index + 1)
+
+
+# ---- hairstyle variants of the LOCKED identity (hair only) -------------------------------------
+HAIRSTYLE_PROMPT = (
+    "Edit the attached portrait: change ONLY the hairstyle to: {description}. Keep the face, facial features, skin, "
+    "expression, clothing, lighting, camera framing, background and image quality exactly the same, and keep the hair "
+    "colour natural black unless the description says otherwise. Photoreal, natural hair texture and hairline, "
+    "head-and-shoulders, mouth closed."
+)
+
+HAIRSTYLES = [
+    {"id": "hair_neat_side_part", "description": "a short, neat, classic side-parted cut, clean tapered sides, tidy and professional"},
+    {"id": "hair_textured_quiff", "description": "a short textured quiff swept up and slightly back at the front, tapered sides, modern and energetic"},
+    {"id": "hair_medium_soft", "description": "a medium-length soft layered cut that falls loosely over the forehead and just covers the tops of the ears, relaxed and approachable"},
+    {"id": "hair_close_crop", "description": "a very short close-cropped cut with a low skin fade on the sides, minimal and sharp"},
+]
+
+
+def hairstyle_prompt(description: str) -> str:
+    return HAIRSTYLE_PROMPT.format(description=description)
+
+
+# ---- person-free background plates (Remotion composites the matted presenter over them) ---------
+PLATE_PROMPT = (
+    "A photoreal, EMPTY background plate for a presenter video: {scene}. There must be NO person, no face, no hands and "
+    "no text or logos anywhere. Shallow depth of field with a softly blurred background, gentle even lighting, calm "
+    "uncluttered composition. Keep the central vertical third of the frame clean and low-contrast so a presenter can "
+    "stand in front of it, and keep any interesting detail in the left and right thirds, with nothing important "
+    "outside the centre 9:16 column being essential. 16:9 frame, camera at eye height."
+)
+
+BACKGROUND_PLATES = [
+    {"id": "bg_modern_studio", "label": "Modern studio", "scene": "a modern minimal video studio wall in warm neutral grey with soft vertical LED light strips and a subtle textured acoustic panel"},
+    {"id": "bg_home_office", "label": "Home office", "scene": "a tidy bright home office behind a desk, out-of-focus monitor glow, a green plant and a warm desk lamp, light wood and soft daylight from the left"},
+    {"id": "bg_bookshelf", "label": "Bookshelf", "scene": "a warm, softly blurred wooden bookshelf filled with books and a few small objects, cosy evening light with a warm practical lamp"},
+]
+
+
+def plate_prompt(scene: str) -> str:
+    return PLATE_PROMPT.format(scene=scene)
