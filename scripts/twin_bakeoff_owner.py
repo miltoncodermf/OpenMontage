@@ -28,7 +28,10 @@ sys.path.insert(0, str(REPO))
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 PROFILE = os.environ.get("BAKEOFF_PROFILE", "ming")
-OUT = REPO / "projects" / f"presenter-onboarding-{PROFILE}" / "bakeoff" / "local"
+TAG = os.environ.get("BAKEOFF_TAG", "local")  # output folder name; use e.g. "local_smile" with BAKEOFF_PORTRAIT
+PORTRAIT = os.environ.get("BAKEOFF_PORTRAIT")  # portrait image relative to the profile dir (default: the default-hairstyle portrait)
+VARIANT = os.environ.get("BAKEOFF_VARIANT", "default_hair1")
+OUT = REPO / "projects" / f"presenter-onboarding-{PROFILE}" / "bakeoff" / TAG
 OUT.mkdir(parents=True, exist_ok=True)
 NARRATION = OUT / "narration.wav"
 TEXT = ("Unified memory lets the CPU and the GPU share one pool of fast memory. That is why a laptop can hold a very large "
@@ -116,8 +119,8 @@ def stage_liveportrait() -> dict:
     from tools.presenters.twin_performance_transfer import TwinPerformanceTransfer
 
     d = pdir()
-    portrait = pp.default_portrait(PROFILE)
-    res = TwinPerformanceTransfer().execute({"profile_id": PROFILE, "variant_id": "default_hair1", "variant_image": str(portrait),
+    portrait = (d / PORTRAIT) if PORTRAIT else pp.default_portrait(PROFILE)
+    res = TwinPerformanceTransfer().execute({"profile_id": PROFILE, "variant_id": VARIANT, "variant_image": str(portrait),
                                              "driving_video": str(d / "derived" / "driving_performance_seg.mp4"),
                                              "lock_eyes": True, "expression_gain": EXPRESSION_GAIN})
     if not res.success:
@@ -135,7 +138,7 @@ def stage_lipsync() -> dict:
     _registry()
     from tools.presenters.twin_lipsync import TwinLipsync
 
-    motion = pdir() / "performance" / "default_hair1.mp4"
+    motion = pdir() / "performance" / f"{VARIANT}.mp4"
     res = TwinLipsync().execute({"backend": "musetalk_mlx", "motion_source": str(motion), "output_dir": str(OUT),
                                  "segments": [{"segment_id": "seg1", "audio": str(NARRATION)}]})
     if not res.success:

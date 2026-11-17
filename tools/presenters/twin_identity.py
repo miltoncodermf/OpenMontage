@@ -91,14 +91,14 @@ class TwinIdentity(BaseTool):
     )
     fallback_tools: list[str] = []
     capabilities = ["extract_stills", "beautify_portrait", "wardrobe_variant", "hairstyle_variant", "background_plate", "pick_canonical", "standin_portrait"]
-    supports = {"operations": ["extract_stills", "beautify", "wardrobe", "hairstyle", "background_plate", "pick_canonical", "standin_portrait"], "license_note": "MediaPipe Apache-2.0; no InsightFace weights"}
+    supports = {"operations": ["extract_stills", "beautify", "wardrobe", "hairstyle", "expression", "background_plate", "pick_canonical", "standin_portrait"], "license_note": "MediaPipe Apache-2.0; no InsightFace weights"}
     best_for = ["building and extending the owner's beautified identity from his own stills"]
     not_good_for = ["rendering raw owner footage (never allowed)"]
     input_schema = {
         "type": "object",
         "required": ["operation", "profile_id"],
         "properties": {
-            "operation": {"type": "string", "enum": ["extract_stills", "beautify", "wardrobe", "hairstyle", "background_plate", "pick_canonical", "standin_portrait"]},
+            "operation": {"type": "string", "enum": ["extract_stills", "beautify", "wardrobe", "hairstyle", "expression", "background_plate", "pick_canonical", "standin_portrait"]},
             "profile_id": {"type": "string"},
             "count": {"type": "integer", "default": 5},
             "model": {"type": "string", "default": DEFAULT_IMAGE_MODEL},
@@ -116,6 +116,7 @@ class TwinIdentity(BaseTool):
             "spend_ledger": {"type": "string", "description": "JSON file recording every paid call; the guard sums it"},
             "ref_stills": {"type": "array", "items": {"type": "string"}, "description": "beautify: still file names to use as references (default: the first four); pick frontal, eyes-to-camera frames"},
             "tweaks": {"type": "string"},
+            "base_image": {"type": "string", "description": "expression: portrait to edit (default: the default-hairstyle portrait)"},
         },
     }
     resource_profile = ResourceProfile(cpu_cores=1, ram_mb=512, vram_mb=0, disk_mb=100, network_required=True)
@@ -162,6 +163,8 @@ class TwinIdentity(BaseTool):
                 return self._wardrobe(d, pid, inputs)
             if op == "hairstyle":
                 return self._hairstyle(d, pid, inputs)
+            if op == "expression":
+                return self._expression(d, pid, inputs)
             if op == "background_plate":
                 return self._background_plate(d, pid, inputs)
             if op == "pick_canonical":
@@ -361,6 +364,38 @@ class TwinIdentity(BaseTool):
         cat_path.write_text(json.dumps(catalog, indent=2))
         cat_path.chmod(0o600)
         return ToolResult(success=True, data={"variant": vid, "image": str(out), "catalog_size": len(catalog)})
+
+    def _expression(self, d: Path, pid: str, inputs: dict[str, Any]) -> ToolResult:
+        """Expression-only edit of a base portrait (default: the profile's default hairstyle portrait) →
+        identity/expression/<id>.png + expression_catalog.json. One paid call."""
+        from lib.twin_prompts import expression_prompt
+
+        blocked = self._guard_paid(inputs) or self._consent_problem(pid)
+        vid, desc = inputs.get("variant_id"), inputs.get("description")
+        if not blocked and (not vid or not desc):
+            blocked = "variant_id and description are required"
+        base = Path(inputs["base_image"]) if inputs.get("base_image") else pp.default_portrait(pid)
+        if not blocked and not base.is_file():
+            blocked = f"base portrait not found: {base}"
+        model = inputs.get("model", DEFAULT_IMAGE_MODEL)
+        blocked = blocked or self._budget_problem(inputs, model, 1)
+        if blocked:
+            return ToolResult(success=False, error=blocked)
+        out = d / "identity" / "expression" / f"{vid}.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        res = self._call_image(d, expression_prompt(desc), [base], out, model)
+        if not res.success:
+            return ToolResult(success=False, error=res.error)
+        self._ledger_add(inputs, "expression", model, out.name, res.cost_usd)
+        cat_path = d / "identity" / "expression_catalog.json"
+        catalog = json.loads(cat_path.read_text()) if cat_path.is_file() else []
+        catalog = [c for c in catalog if c["id"] != vid]
+        catalog.append({"id": vid, "description": desc, "prompt": expression_prompt(desc), "image": out.relative_to(d).as_posix(),
+                        "base": base.relative_to(d).as_posix() if base.is_relative_to(d) else str(base), "model": model,
+                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        cat_path.write_text(json.dumps(catalog, indent=2))
+        cat_path.chmod(0o600)
+        return ToolResult(success=True, data={"variant": vid, "image": str(out), "catalog_size": len(catalog), "estimated_usd": self.estimate_cost({"operation": "wardrobe", "model": model})})
 
     def _background_plate(self, d: Path, pid: str, inputs: dict[str, Any]) -> ToolResult:
         """Person-free 16:9 plate (no reference photo of the owner is sent) → backgrounds/<id>.png (+ catalog entry)."""

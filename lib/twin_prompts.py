@@ -116,6 +116,22 @@ def hairstyle_prompt(description: str) -> str:
     return HAIRSTYLE_PROMPT.format(description=description)
 
 
+EXPRESSION_PROMPT = (
+    "Edit the attached portrait: change ONLY the facial expression to: {description}. Keep the person's face shape, "
+    "facial features, skin, hairstyle, clothing, lighting, camera framing, background and image quality exactly the "
+    "same, and keep the eyes looking straight into the camera. Photoreal, natural skin, head-and-shoulders."
+)
+
+EXPRESSIONS = [
+    {"id": "expr_warm_smile", "description": "a gentle, relaxed, warm closed-mouth smile with softly lifted cheeks and relaxed brows, "
+                                             "friendly and natural, like greeting a viewer you like (not a grin, no teeth)"},
+]
+
+
+def expression_prompt(description: str) -> str:
+    return EXPRESSION_PROMPT.format(description=description)
+
+
 # ---- person-free background plates (Remotion composites the matted presenter over them) ---------
 PLATE_PROMPT = (
     "A photoreal, EMPTY background plate for a presenter video: {scene}. There must be NO person, no face, no hands and "
