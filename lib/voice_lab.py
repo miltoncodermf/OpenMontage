@@ -27,6 +27,34 @@ POLISH_CHAIN = {
     "steps": ["high-pass 80 Hz", "presence EQ +2 dB @ 3.2 kHz", "de-ess", "light compression 3:1", "loudness normalize -16 LUFS"],
 }
 
+# v2 ("fuller"): for a Chatterbox clone of a roomy recording. Takes the boxy 300-600 Hz hump down, adds presence and a bit of air,
+# uses slower, gentler compression so room tail between words is not pumped up, and loudness-normalises last.
+POLISH_CHAIN_V2 = {
+    "name": "om-voice-polish-v2",
+    "ffmpeg_filter": (
+        "highpass=f=75,"
+        "equalizer=f=180:t=q:w=0.9:g=1.5,"
+        "equalizer=f=420:t=q:w=1.1:g=-2.5,"
+        "equalizer=f=3200:t=q:w=1.0:g=3.0,"
+        "equalizer=f=6500:t=q:w=0.8:g=1.5,"
+        "deesser=i=0.4:m=0.5:f=0.5:s=o,"
+        "acompressor=threshold=-20dB:ratio=2.5:attack=20:release=250:makeup=3,"
+        "loudnorm=I=-16:TP=-1.5:LRA=11"
+    ),
+    "steps": ["high-pass 75 Hz", "warmth +1.5 dB @ 180 Hz", "boxy cut -2.5 dB @ 420 Hz", "presence +3 dB @ 3.2 kHz",
+              "air +1.5 dB @ 6.5 kHz", "de-ess", "gentle compression 2.5:1", "loudness normalize -16 LUFS"],
+}
+POLISH_CHAINS = {POLISH_CHAIN["name"]: POLISH_CHAIN, POLISH_CHAIN_V2["name"]: POLISH_CHAIN_V2}
+
+# Named voice-quality variants for a Chatterbox clone of the owner's (roomy) recording. "current" = the first lock.
+VOICE_VARIANTS = {
+    "current": {"reference": "raw/working/voice_ref.wav", "tilt_eq": None, "polish": "om-voice-polish-v1", "stretch": "ffmpeg", "output_dereverb": None},
+    "clean_ref": {"reference": "raw/working/voice_ref_clean.wav", "tilt_eq": False, "polish": "om-voice-polish-v1", "stretch": "rubberband-r3", "output_dereverb": None},
+    "clean_ref_fuller": {"reference": "raw/working/voice_ref_clean_eq.wav", "tilt_eq": True, "polish": "om-voice-polish-v2", "stretch": "rubberband-r3", "output_dereverb": None},
+    "clean_ref_fuller_dereverb": {"reference": "raw/working/voice_ref_clean_eq.wav", "tilt_eq": True, "polish": "om-voice-polish-v2", "stretch": "rubberband-r3",
+                                  "output_dereverb": {"rt60": 0.5, "strength": 1.0}},
+}
+
 # The same tutorial-style paragraph (~20 s) for every candidate so comparison is fair.
 SAMPLE_PARAGRAPH = (
     "Today we're going to build something real, step by step. First, I'll show you how the pieces fit together, "
@@ -129,18 +157,41 @@ def _has_filter(name: str) -> bool:
     return _FILTERS[name]
 
 
-def polish(src: Path, dst: Path, tempo: float = 1.0) -> None:
-    """Apply the fixed polish chain (same for every candidate, so comparison is fair).
+def stretch_file(src: Path, dst: Path, tempo: float) -> str:
+    """Pitch-preserving stretch to ``dst``; returns the method used. Prefers the rubberband CLI's R3 (finer) engine,
+    which has far fewer phasey artifacts than ffmpeg's R2-based filter; falls back to the ffmpeg filter."""
+    import shutil
+
+    if shutil.which("rubberband"):
+        subprocess.run(["rubberband", "-q", "-3", "-T", f"{tempo:.4f}", str(src), str(dst)], check=True, timeout=600)
+        return "rubberband-cli R3"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-af", time_stretch_filter(tempo), str(dst)],
+                   check=True, timeout=600)
+    return "ffmpeg " + time_stretch_filter(tempo)
+
+
+def polish(src: Path, dst: Path, tempo: float = 1.0, chain: str | dict | None = None, r3: bool = False) -> None:
+    """Apply a polish chain (default v1; same for every candidate, so comparison is fair).
 
     ``tempo`` (< 1 = slower) is applied BEFORE the chain so loudness normalisation sees the final audio; everything
-    downstream (captions, scene timing) measures the stretched file.
+    downstream (captions, scene timing) measures the stretched file. ``r3=True`` stretches with the rubberband CLI's R3
+    engine (falls back to the ffmpeg filter when the CLI is missing).
     """
-    stretch = time_stretch_filter(tempo)
-    chain = (stretch + "," if stretch else "") + POLISH_CHAIN["ffmpeg_filter"]
-    subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-af", chain, "-ar", "48000", str(dst)],
-        check=True, timeout=600,
-    )
+    import tempfile
+
+    spec = POLISH_CHAIN if chain is None else (POLISH_CHAINS[chain] if isinstance(chain, str) else chain)
+    with tempfile.TemporaryDirectory() as td:
+        pre = src
+        stretch = ""
+        if abs(tempo - 1.0) > 1e-9:
+            if r3:
+                pre = Path(td) / "stretched.wav"
+                stretch_file(src, pre, tempo)
+            else:
+                stretch = time_stretch_filter(tempo)
+        af = (stretch + "," if stretch else "") + spec["ffmpeg_filter"]
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(pre), "-af", af, "-ar", "48000", str(dst)],
+                       check=True, timeout=600)
 
 
 def write_candidates_page(out_dir: Path, candidates: list[dict[str, Any]], title: str = "Pick your presenter voice") -> Path:
@@ -169,12 +220,14 @@ def write_candidates_page(out_dir: Path, candidates: list[dict[str, Any]], title
     return out
 
 
-def build_voice_profile(candidate: dict[str, Any], *, model_version: str, seed: int = 1234, tempo: float = 1.0) -> dict[str, Any]:
+def build_voice_profile(candidate: dict[str, Any], *, model_version: str, seed: int = 1234, tempo: float = 1.0,
+                        polish_chain: str | None = None, stretch_engine: str | None = None,
+                        output_dereverb: dict[str, float] | None = None, variant: str | None = None) -> dict[str, Any]:
     """voice_profile.json content for a picked candidate (locked recipe)."""
     engine = candidate["engine"]
     prof: dict[str, Any] = {
         "version": "1.0", "engine": engine, "model_version": model_version, "candidate_id": candidate["candidate_id"],
-        "recipe": candidate["recipe"], "polish_chain": POLISH_CHAIN, "seed": seed,
+        "recipe": candidate["recipe"], "polish_chain": POLISH_CHAINS[polish_chain] if polish_chain else POLISH_CHAIN, "seed": seed,
         "sample": candidate.get("sample"),
         "notes": "Synthesis is seeded: identical for a given text up to float32 GPU jitter (max abs diff ~1e-4, inaudible), not byte-identical.",
     }
@@ -185,7 +238,10 @@ def build_voice_profile(candidate: dict[str, Any], *, model_version: str, seed: 
         prof["owner_ref"] = candidate["owner_ref"]
         prof["donor_refs"] = candidate["donor_refs"]
         prof["speed"] = float(tempo)
-        prof["time_stretch"] = time_stretch_filter(tempo) or "none"
+        prof["stretch_engine"] = stretch_engine or "ffmpeg"
+        prof["output_dereverb"] = output_dereverb
+        prof["voice_variant"] = variant or "current"
+        prof["time_stretch"] = ("rubberband-cli R3" if stretch_engine == "rubberband-r3" else time_stretch_filter(tempo)) if tempo != 1.0 else "none"
         prof["synthesis"] = {"unit": "sentence", "asr_check": {"min_coverage": 0.85, "ending_must_be_heard": True},
                              "max_takes": 4, "paragraph_gap_s": 0.45, "sentence_gap_s": 0.16, "max_words_per_chunk": 30}
         prof["notes"] = ("Per-sentence Chatterbox synthesis, each sentence ASR-checked and re-rolled if cut short; speed < 1 is a "

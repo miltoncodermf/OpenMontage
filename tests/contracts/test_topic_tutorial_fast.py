@@ -3393,3 +3393,144 @@ class TestLockCoversCoreNotDerivedCaches:
         (d / "identity" / "extra.png").unlink()
         (d / "voice" / "voice_profile.json").write_text('{"changed": 1}')
         assert any("hash mismatch voice/voice_profile.json" in p for p in pp.verify_profile("ming"))
+
+
+class TestRoomyReferenceCleaning:
+    def _reverberant(self, sr=24000):
+        import numpy as np
+
+        rng = np.random.default_rng(3)
+        dry = np.zeros(sr * 8, dtype="float32")
+        for k in range(8):  # eight "words": 0.45 s of voiced noise then a 0.55 s pause
+            a = int(k * sr * 1.0)
+            t = np.arange(int(sr * 0.45)) / sr
+            dry[a:a + len(t)] = (0.2 * np.sin(2 * np.pi * (140 + 20 * k) * t) * np.hanning(len(t))).astype("float32")
+        n = int(sr * 0.7)
+        ir = (rng.standard_normal(n) * np.exp(-np.arange(n) / sr * 6.9 / 0.5)).astype("float32")  # RT60 ~ 0.5 s
+        ir[0] = 1.0
+        wet = np.convolve(dry, ir)[: len(dry)]
+        return dry, (wet / np.abs(wet).max() * 0.5).astype("float32")
+
+    def test_dereverb_lowers_the_tail_and_keeps_speech_level(self):
+        import numpy as np
+        from lib import voice_clean as vc
+        from lib import voice_metrics as vm
+
+        sr = 24000
+        dry, wet = self._reverberant(sr)
+        out = vc.dereverb(wet, sr, rt60=0.5, strength=1.5)
+        before, after = vm.tail(wet, sr), vm.tail(out, sr)
+        assert after["pause_floor_db"] < before["pause_floor_db"] - 3.0  # pauses are quieter relative to speech
+        assert abs(20 * np.log10(np.abs(out).max() / np.abs(wet).max())) < 6.0  # speech level not destroyed
+        assert len(out) == len(wet) and np.isfinite(out).all()
+
+    def test_metrics_tell_dry_from_roomy(self):
+        from lib import voice_metrics as vm
+
+        sr = 24000
+        dry, wet = self._reverberant(sr)
+        assert vm.tail(dry, sr)["pause_floor_db"] < vm.tail(wet, sr)["pause_floor_db"] - 10
+        b = vm.bands(wet, sr)
+        assert set(b) == {"rel_db_vs_1.3-4k", "body_share_below_250hz", "centroid_hz"} and 0 < b["body_share_below_250hz"] <= 1
+
+    def test_clean_reference_never_touches_the_source_and_writes_a_working_copy(self, tmp_path):
+        import hashlib
+        import soundfile as sf
+        from lib import voice_clean as vc
+
+        sr = 24000
+        _, wet = self._reverberant(sr)
+        src = tmp_path / "read.wav"
+        sf.write(str(src), wet.repeat(2)[: sr * 16 * 2][:: 2] if False else __import__("numpy").tile(wet, 2), sr)
+        before = hashlib.sha256(src.read_bytes()).hexdigest()
+        info = vc.make_clean_reference(src, tmp_path / "working" / "ref.wav", seconds=6.0, tilt_eq=True)
+        assert hashlib.sha256(src.read_bytes()).hexdigest() == before
+        out = sf.info(str(tmp_path / "working" / "ref.wav"))
+        assert out.samplerate == 24000 and out.channels == 1 and abs(out.duration - 6.0) < 0.1 and info["tilt_eq"] is True
+
+    def test_profile_selects_polish_chain_and_r3_stretch(self, tmp_path, monkeypatch):
+        import json
+        import numpy as np
+        import soundfile as sf
+        from lib import chatterbox_runner as cr
+        from lib import chatterbox_voice as cv
+        from lib import voice_lab as vl
+
+        prof = TestLockedChatterboxVoice()._profile(tmp_path)[0]
+        d = json.loads(prof.read_text())
+        d["polish_chain"], d["stretch_engine"] = vl.POLISH_CHAINS["om-voice-polish-v2"], "rubberband-r3"
+        prof.write_text(json.dumps(d))
+        seen = {}
+
+        def fake_synth(owner, donors, cands, sentences, out_dir, **kw):
+            out = Path(out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            chunks = []
+            for i, s in enumerate(sentences):
+                f = out / f"{i}.wav"
+                sf.write(str(f), np.zeros(24000, dtype="float32"), 24000)
+                chunks.append({"idx": i, "raw": str(f), "seed": 1, "sr": 24000, "text": s, "seconds": 0, "audio_s": 1.0})
+            return {"candidates": [{"candidate_id": cands[0]["candidate_id"], "sr": 24000, "weights": [1], "chunks": chunks}]}
+
+        monkeypatch.setattr(cr, "available", lambda: (True, "ok"))
+        monkeypatch.setattr(cr, "synthesize", fake_synth)
+        monkeypatch.setattr(vl, "asr_coverage", lambda w, t, model_size="base": {"coverage": 1.0, "heard": t})
+        monkeypatch.setattr(vl, "polish", lambda src, dst, tempo=1.0, chain=None, r3=False: seen.update(tempo=tempo, chain=chain, r3=r3) or sf.write(str(dst), np.zeros(4800, dtype="float32"), 48000))
+        rep = cv.synthesize_narration(prof, "One sentence here.", tmp_path / "o.wav")
+        assert seen == {"tempo": 0.95, "chain": "om-voice-polish-v2", "r3": True} and rep["time_stretch"] == "rubberband-cli R3"
+        assert rep["polish_chain"] == "om-voice-polish-v2"
+
+    def test_polish_v2_is_fuller_than_v1_by_design_and_registered(self):
+        from lib import voice_lab as vl
+
+        assert set(vl.POLISH_CHAINS) == {"om-voice-polish-v1", "om-voice-polish-v2"}
+        assert "equalizer=f=420" in vl.POLISH_CHAIN_V2["ffmpeg_filter"] and "g=-2.5" in vl.POLISH_CHAIN_V2["ffmpeg_filter"]
+        assert vl.POLISH_CHAIN_V2["ffmpeg_filter"].endswith("loudnorm=I=-16:TP=-1.5:LRA=11")  # loudness is still last
+
+
+class TestVoiceVariants:
+    def test_variants_table_is_consistent_with_chains_and_refs(self):
+        from lib import voice_lab as vl
+
+        assert set(vl.VOICE_VARIANTS) == {"current", "clean_ref", "clean_ref_fuller", "clean_ref_fuller_dereverb"}
+        for name, v in vl.VOICE_VARIANTS.items():
+            assert v["polish"] in vl.POLISH_CHAINS and v["reference"].startswith("raw/working/") and v["stretch"] in ("ffmpeg", "rubberband-r3")
+        assert vl.VOICE_VARIANTS["current"]["tilt_eq"] is None and vl.VOICE_VARIANTS["clean_ref_fuller_dereverb"]["output_dereverb"]["rt60"] == 0.5
+
+    def test_profile_records_variant_and_output_dereverb_is_applied(self, tmp_path, monkeypatch):
+        import json
+        import numpy as np
+        import soundfile as sf
+        from lib import chatterbox_runner as cr
+        from lib import chatterbox_voice as cv
+        from lib import voice_clean as vc
+        from lib import voice_lab as vl
+
+        prof = TestLockedChatterboxVoice()._profile(tmp_path)[0]
+        d = json.loads(prof.read_text())
+        v = vl.VOICE_VARIANTS["clean_ref_fuller_dereverb"]
+        d2 = vl.build_voice_profile({"candidate_id": "c2_owner50", "engine": "chatterbox", "recipe": d["recipe"], "sample": "voice/sample.wav",
+                                     "owner_ref": d["owner_ref"], "donor_refs": d["donor_refs"]}, model_version="x", tempo=0.95,
+                                    polish_chain=v["polish"], stretch_engine=v["stretch"], output_dereverb=v["output_dereverb"], variant="clean_ref_fuller_dereverb")
+        assert d2["voice_variant"] == "clean_ref_fuller_dereverb" and d2["polish_chain"]["name"] == "om-voice-polish-v2"
+        assert d2["stretch_engine"] == "rubberband-r3" and d2["output_dereverb"] == {"rt60": 0.5, "strength": 1.0}
+        prof.write_text(json.dumps(d2))
+        calls = {}
+
+        def fake_synth(owner, donors, cands, sentences, out_dir, **kw):
+            out = Path(out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            chunks = []
+            for i, s in enumerate(sentences):
+                f = out / f"{i}.wav"
+                sf.write(str(f), np.zeros(24000, dtype="float32"), 24000)
+                chunks.append({"idx": i, "raw": str(f), "seed": 1, "sr": 24000, "text": s, "seconds": 0, "audio_s": 1.0})
+            return {"candidates": [{"candidate_id": cands[0]["candidate_id"], "sr": 24000, "weights": [1], "chunks": chunks}]}
+
+        monkeypatch.setattr(cr, "available", lambda: (True, "ok"))
+        monkeypatch.setattr(cr, "synthesize", fake_synth)
+        monkeypatch.setattr(vl, "asr_coverage", lambda w, t, model_size="base": {"coverage": 1.0, "heard": t})
+        monkeypatch.setattr(vc, "dereverb", lambda y, sr, rt60, strength, **kw: calls.update(rt60=rt60, strength=strength) or y)
+        monkeypatch.setattr(vl, "polish", lambda src, dst, tempo=1.0, chain=None, r3=False: sf.write(str(dst), np.zeros(4800, dtype="float32"), 48000))
+        rep = cv.synthesize_narration(prof, "One sentence here.", tmp_path / "o.wav")
+        assert calls == {"rt60": 0.5, "strength": 1.0} and rep["output_dereverb"] == {"rt60": 0.5, "strength": 1.0}

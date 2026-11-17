@@ -56,6 +56,7 @@
         "profile": { "type": "string", "description": "Relative path, e.g. voice/voice_profile.json" },
         "picked_candidate": { "type": "string" },
         "engine": { "type": "string" },
+        "variant": { "type": "string", "description": "Voice-quality variant (reference cleaning, polish chain, output de-reverb)" },
         "speed": { "type": "number", "description": "Narration tempo factor (< 1 = slower), applied as a pitch-preserving time-stretch" },
         "watermark_note": { "type": "string" }
       }

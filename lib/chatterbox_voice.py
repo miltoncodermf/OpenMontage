@@ -119,19 +119,30 @@ def synthesize_narration(prof_path: Path, text: str, out_path: Path, *, workdir:
         joined = work / "joined.wav"
         vl.assemble_chunks([Path(best[i]["raw"]) for i in range(len(sentences))], joined, [g for _, g in chunks])
         src = joined
+        dr = r["profile"].get("output_dereverb")
+        if dr:  # light backstop: late-reverb suppression on the joined raw audio, before stretch and polish
+            import soundfile as sf
+
+            from lib import voice_clean
+
+            y, ysr = sf.read(str(joined), dtype="float32")
+            src = work / "dereverbed.wav"
+            sf.write(str(src), voice_clean.dereverb(y, ysr, rt60=float(dr["rt60"]), strength=float(dr["strength"])), ysr)
         pitch = float(cand.get("pitch_semitones", 0.0))
         if abs(pitch) > 1e-6:
-            src = work / "pitched.wav"
+            src0, src = src, work / "pitched.wav"
             f = 2 ** (pitch / 12)
-            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(joined), "-af",
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src0), "-af",
                             f"asetrate={int(sr * f)},aresample={sr},atempo={1 / f:.6f}", str(src)], check=True, timeout=600)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        vl.polish(src, out_path, tempo=tempo)
+        chain = r["profile"].get("polish_chain", {}).get("name") or vl.POLISH_CHAIN["name"]
+        r3 = r["profile"].get("stretch_engine") == "rubberband-r3"
+        vl.polish(src, out_path, tempo=tempo, chain=chain, r3=r3)
     finally:
         if ctx is not None:
             ctx.cleanup()
     incomplete = [i + 1 for i in range(len(sentences)) if not best[i]["ok"]]
-    return {"sentences": len(sentences), "speed": tempo, "time_stretch": vl.time_stretch_filter(tempo) or "none",
-            "takes": [best[i]["takes"] for i in range(len(sentences))], "rerolled": sum(1 for i in best if best[i]["takes"] > 1),
+    return {"sentences": len(sentences), "speed": tempo, "time_stretch": ("rubberband-cli R3" if r3 else (vl.time_stretch_filter(tempo) or "none")) if tempo != 1.0 else "none",
+            "polish_chain": chain, "output_dereverb": r["profile"].get("output_dereverb"), "takes": [best[i]["takes"] for i in range(len(sentences))], "rerolled": sum(1 for i in best if best[i]["takes"] > 1),
             "incomplete_sentences": incomplete,
             "warning": (f"sentence(s) {incomplete} may still be cut short after {MAX_TAKES} takes" if incomplete else None)}

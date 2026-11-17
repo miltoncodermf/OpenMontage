@@ -78,6 +78,7 @@ class VoiceLab(BaseTool):
             "operation": {"type": "string", "enum": ["build_candidates", "lock_voice"]},
             "profile_id": {"type": "string"},
             "candidate": {"type": "string", "description": "candidate_id to lock"},
+            "variant": {"type": "string", "enum": ["current", "clean_ref", "clean_ref_fuller", "clean_ref_fuller_dereverb"], "description": "lock_voice (chatterbox): voice-quality variant (reference cleaning, polish chain, output de-reverb)"},
             "speed": {"type": "number", "description": "lock_voice (chatterbox): narration tempo factor, e.g. 0.95 = 5% slower (pitch-preserving)"},
         },
     }
@@ -98,7 +99,7 @@ class VoiceLab(BaseTool):
             if inputs.get("operation") == "build_candidates":
                 return self._build(inputs["profile_id"])
             if inputs.get("operation") == "lock_voice":
-                return self._lock(inputs["profile_id"], inputs.get("candidate", ""), float(inputs.get("speed", 1.0)))
+                return self._lock(inputs["profile_id"], inputs.get("candidate", ""), float(inputs.get("speed", 1.0)), inputs.get("variant", "current"))
             return ToolResult(success=False, error=f"unknown operation {inputs.get('operation')!r}")
         except (pp.ProfileError, KeyError, ValueError) as exc:
             return ToolResult(success=False, error=str(exc))
@@ -250,7 +251,7 @@ class VoiceLab(BaseTool):
             rep["candidates"] = out_cands
         return rep
 
-    def _lock_chatterbox(self, pid: str, candidate: str, speed: float) -> ToolResult:
+    def _lock_chatterbox(self, pid: str, candidate: str, speed: float, variant: str = "current") -> ToolResult:
         """Lock a Chatterbox blend: recipe + owner reference + donor references + speed, then regenerate the sample through
         the real narration path (per-sentence ASR-checked synthesis, speed factor, polish chain)."""
         from lib import chatterbox_voice
@@ -264,9 +265,17 @@ class VoiceLab(BaseTool):
         raw_voice = next(iter(sorted((d / "raw").glob("voice_read.*"))), None)
         if raw_voice is None:
             return ToolResult(success=False, error="raw/voice_read.* missing — the owner's voice reading is required")
-        ref = d / "raw" / "working" / "voice_ref.wav"
+        if variant not in vl.VOICE_VARIANTS:
+            return ToolResult(success=False, error=f"unknown voice variant {variant!r}; have {sorted(vl.VOICE_VARIANTS)}")
+        var = vl.VOICE_VARIANTS[variant]
+        ref = d / var["reference"]
         if not ref.is_file():
-            vl.make_voice_reference(raw_voice, ref)
+            if var["tilt_eq"] is None:
+                vl.make_voice_reference(raw_voice, ref)
+            else:  # cleaned working copy of the owner's read (the raw file is never modified)
+                from lib import voice_clean
+
+                voice_clean.make_clean_reference(raw_voice, ref, tilt_eq=bool(var["tilt_eq"]))
         donors_dir = d / "voice" / "donors"
         donors_dir.mkdir(parents=True, exist_ok=True)
         donors_dir.chmod(0o700)
@@ -282,8 +291,9 @@ class VoiceLab(BaseTool):
         recipe = {k: rec[k] for k in ("owner_weight", "donors", "exaggeration", "cfg", "pitch_semitones")}
         prof_json = vl.build_voice_profile(
             {"candidate_id": candidate, "engine": "chatterbox", "recipe": recipe, "sample": "voice/sample.wav",
-             "owner_ref": "raw/working/voice_ref.wav", "donor_refs": donor_rel},
-            model_version="ResembleAI/chatterbox via chatterbox-mlx (dedicated venv)", tempo=speed)
+             "owner_ref": var["reference"], "donor_refs": donor_rel},
+            model_version="ResembleAI/chatterbox via chatterbox-mlx (dedicated venv)", tempo=speed,
+            polish_chain=var["polish"], stretch_engine=var["stretch"], output_dereverb=var["output_dereverb"], variant=variant)
         vp = d / "voice" / "voice_profile.json"
         vp.write_text(json.dumps(prof_json, indent=2))
         vp.chmod(0o600)
@@ -293,7 +303,7 @@ class VoiceLab(BaseTool):
         cov = vl.asr_coverage(sample, vl.SAMPLE_PARAGRAPH)
         prof = pp.read_profile(pid)
         prof["voice"] = {"profile": "voice/voice_profile.json", "picked_candidate": candidate, "engine": "chatterbox",
-                         "speed": speed, "watermark_note": prof_json["watermark_note"]}
+                         "speed": speed, "variant": variant, "watermark_note": prof_json["watermark_note"]}
         pp.write_profile(d, prof)
         info = sf.info(str(sample))
         return ToolResult(success=True, data={
@@ -302,12 +312,12 @@ class VoiceLab(BaseTool):
             "sample_seconds": round(info.frames / float(info.samplerate), 2),
             "sample_asr_coverage": cov["coverage"], "synthesis": rep})
 
-    def _lock(self, pid: str, candidate: str, speed: float = 1.0) -> ToolResult:
+    def _lock(self, pid: str, candidate: str, speed: float = 1.0, variant: str = "current") -> ToolResult:
         d = pp.profile_dir(pid)
         rec = next((r for r in vl.KOKORO_BLENDS if r["candidate_id"] == candidate), None)
         if rec is None:
             if any(r["candidate_id"] == candidate for r in vl.CHATTERBOX_BLENDS):
-                return self._lock_chatterbox(pid, candidate, speed)
+                return self._lock_chatterbox(pid, candidate, speed, variant)
             return ToolResult(success=False, error=f"candidate {candidate!r} is not a built candidate")
         wav = d / "voice" / "candidates" / f"{candidate}.wav"
         if not wav.is_file():
