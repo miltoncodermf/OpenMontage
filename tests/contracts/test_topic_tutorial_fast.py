@@ -3534,3 +3534,71 @@ class TestVoiceVariants:
         monkeypatch.setattr(vl, "polish", lambda src, dst, tempo=1.0, chain=None, r3=False: sf.write(str(dst), np.zeros(4800, dtype="float32"), 48000))
         rep = cv.synthesize_narration(prof, "One sentence here.", tmp_path / "o.wav")
         assert calls == {"rt60": 0.5, "strength": 1.0} and rep["output_dereverb"] == {"rt60": 0.5, "strength": 1.0}
+
+
+class TestLivePortraitEyeLockAndGain:
+    """Twin performance transfer: no blinks / eyes-up frames, livelier brows (owner feedback on the local bake-off)."""
+
+    @staticmethod
+    def _template(n=6):
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        motion = [{"exp": rng.normal(size=(1, 21, 3)).astype("float32")} for _ in range(n)]
+        return {"motion": motion, "c_eyes_lst": [np.array([[0.3 if i == 2 else 0.5, 0.3 if i == 2 else 0.5]]) for i in range(n)]}
+
+    def _patched(self, **kw):
+        from lib import _liveportrait_worker as w
+
+        tpl = self._template()
+
+        class Pipe:
+            def make_motion_template(self, *a, **k):
+                return tpl
+
+        w._install_template_edits(Pipe, **kw)
+        return w, tpl, Pipe().make_motion_template(None, None, None)
+
+    def test_eye_lock_removes_blink_and_gaze_change(self):
+        import numpy as np
+
+        w, tpl, out = self._patched(lock_eyes=True, gain=1.0)
+        eyes = np.stack([m["exp"][:, w.EYES_IDX, :] for m in out["motion"]])
+        assert np.allclose(eyes, eyes[0])  # blink frame (idx 2) and every other frame share one eye state
+
+    def test_gain_scales_brows_but_not_mouth_or_eyes(self):
+        import numpy as np
+
+        from lib import _liveportrait_worker as w
+
+        base = self._template()
+        before = [m["exp"].copy() for m in base["motion"]]
+
+        class Pipe:
+            def make_motion_template(self, *a, **k):
+                return base
+
+        w._install_template_edits(Pipe, lock_eyes=False, gain=2.0)
+        out = Pipe().make_motion_template(None, None, None)["motion"]
+        other = [i for i in range(21) if i not in w.EYES_IDX and i not in w.LIP_IDX]
+        assert np.allclose(out[3]["exp"][:, other] - before[0][:, other], 2.0 * (before[3][:, other] - before[0][:, other]), atol=1e-5)
+        assert np.allclose(out[3]["exp"][:, w.LIP_IDX], before[3][:, w.LIP_IDX])
+        assert np.allclose(out[3]["exp"][:, w.EYES_IDX], before[3][:, w.EYES_IDX])
+
+    def test_runner_passes_flags_to_the_worker(self, monkeypatch, tmp_path):
+        from lib import liveportrait_runner as lr
+
+        seen = {}
+        monkeypatch.setattr(lr, "available", lambda: (True, "ok"))
+
+        class R:
+            returncode, stdout, stderr = 0, "", ""
+
+        def fake_run(cmd, **k):
+            seen["cmd"] = cmd
+            (tmp_path / "x.mp4").write_bytes(b"0")
+            return R()
+
+        monkeypatch.setattr(lr.subprocess, "run", fake_run)
+        lr.animate(tmp_path / "s.png", tmp_path / "d.mp4", tmp_path, lock_eyes=True, expression_gain=1.5)
+        assert "--lock-eyes" in seen["cmd"] and seen["cmd"][seen["cmd"].index("--expression-gain") + 1] == "1.5"

@@ -64,15 +64,49 @@ def stage_narration() -> dict:
     return {k: d.get(k) for k in ("duration_seconds", "speed", "synthesis")}
 
 
+HOLD_FRAMES = 3  # prepended copies of the owner's sternest open-eyed frame; LivePortrait animates relative to frame 0
+EXPRESSION_GAIN = 1.6
+
+
 def stage_driving() -> dict:
+    """Trim the driving window and put the sternest frame first (relative motion then makes every later frame livelier)."""
+    import numpy as np
+
     d = pdir()
     src = d / "raw" / "working" / "performance.sdr.mp4"
     dst = d / "derived" / "driving_performance_seg.mp4"
     dst.parent.mkdir(parents=True, exist_ok=True)
+    win = OUT / "driving_window.mp4"
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(DRIVE_START), "-t", str(DRIVE_LEN), "-i", str(src), "-an", "-r", "25",
-                    "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", str(dst)], check=True)
+                    "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", str(win)], check=True)
+    from PIL import Image
+    import tempfile, glob
+    from lib import face_tools
+
+    scores = []
+    with tempfile.TemporaryDirectory() as td:
+        subprocess.run(["ffmpeg", "-v", "error", "-i", str(win), f"{td}/%05d.jpg"], check=True)
+        for f in sorted(glob.glob(td + "/*.jpg")):
+            lm = face_tools.face_landmarks(Image.open(f))
+            if lm is None:
+                scores.append(None)
+                continue
+            def lid(c1, c2, top, bot):
+                return abs(lm[bot, 1] - lm[top, 1]) / (np.linalg.norm(lm[c1, :2] - lm[c2, :2]) + 1e-6)
+            openness = (lid(33, 133, 159, 145) + lid(362, 263, 386, 374)) / 2
+            fw = np.linalg.norm(lm[234, :2] - lm[454, :2])
+            mouth_w = np.linalg.norm(lm[61, :2] - lm[291, :2]) / fw
+            brow = (lm[[105, 334], 1].mean() - lm[[159, 386], 1].mean()) / fw  # least negative = lowest brows = sternest
+            scores.append((float(openness), float(mouth_w), float(brow)))
+    cand = [i for i, sc in enumerate(scores) if sc and sc[0] > 0.6 and sc[1] < 0.34]
+    stern = max(cand, key=lambda i: scores[i][2])
+    hold = OUT / "driving_hold.png"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(win), "-vf", f"select=eq(n\\,{stern})", "-frames:v", "1", str(hold)], check=True)
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-loop", "1", "-t", str(HOLD_FRAMES / 25), "-framerate", "25", "-i", str(hold), "-i", str(win),
+                    "-filter_complex", "[0:v]fps=25,format=yuv420p[a];[1:v]fps=25,format=yuv420p[b];[a][b]concat=n=2:v=1[v]", "-map", "[v]",
+                    "-c:v", "libx264", "-crf", "14", str(dst)], check=True)
     dst.chmod(0o600)
-    return {"driving": str(dst)}
+    return {"driving": str(dst), "stern_frame": stern, "hold_frames": HOLD_FRAMES}
 
 
 def stage_liveportrait() -> dict:
@@ -84,10 +118,17 @@ def stage_liveportrait() -> dict:
     d = pdir()
     portrait = pp.default_portrait(PROFILE)
     res = TwinPerformanceTransfer().execute({"profile_id": PROFILE, "variant_id": "default_hair1", "variant_image": str(portrait),
-                                             "driving_video": str(d / "derived" / "driving_performance_seg.mp4")})
+                                             "driving_video": str(d / "derived" / "driving_performance_seg.mp4"),
+                                             "lock_eyes": True, "expression_gain": EXPRESSION_GAIN})
     if not res.success:
         raise SystemExit(f"liveportrait failed: {res.error}")
-    return res.data
+    out = Path(res.data["output"])
+    tmp = out.with_suffix(".trim.mp4")  # drop the held reference frames
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(HOLD_FRAMES / 25), "-i", str(out), "-an", "-r", "25", "-c:v", "libx264", "-crf", "12",
+                    "-pix_fmt", "yuv420p", str(tmp)], check=True)
+    tmp.replace(out)
+    out.chmod(0o600)
+    return {**res.data, "lock_eyes": True, "expression_gain": EXPRESSION_GAIN, "held_frames_trimmed": HOLD_FRAMES}
 
 
 def stage_lipsync() -> dict:
