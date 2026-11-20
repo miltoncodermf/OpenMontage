@@ -42,12 +42,13 @@ export const PresenterFullScreen: React.FC<PresenterFullScreenProps> = ({
   const lt = toPx(getLayout(canvas.width, canvas.height).lowerThird, canvas);
   const fs = canvas.height / 1080;
 
-  // Gentle subtle camera push-in
+  // Gentle subtle camera push-in, but never on a matted (alpha) presenter: the backdrop does not move, so the person
+  // would visibly grow over the clip (owner feedback: "head resizing towards the end").
   const progress = interpolate(frame, [0, durationInFrames], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
-  const scale = 1.0 + progress * 0.04;
+  const scale = alpha ? 1.0 : 1.0 + progress * 0.04;
 
   const badgeSpring = spring({
     frame,

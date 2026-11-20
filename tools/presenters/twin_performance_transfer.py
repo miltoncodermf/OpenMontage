@@ -52,6 +52,7 @@ class TwinPerformanceTransfer(BaseTool):
         "properties": {"profile_id": {"type": "string"}, "variant_id": {"type": "string"}, "variant_image": {"type": "string"},
                        "driving_video": {"type": "string", "description": "Explicit driving clip (never raw/ unless it is the owner's own performance inside the private profile); default raw/performance.*"},
                        "lock_eyes": {"type": "boolean", "default": False, "description": "Drop blinks and eye/gaze motion from the driving clip so the twin keeps looking straight at the viewer"},
+                       "lock_scale": {"type": "boolean", "default": False, "description": "Keep the head size constant (ignore the driving clip's lean toward/away from the camera)"},
                        "expression_gain": {"type": "number", "default": 1.0, "description": "Scale the driving brow/cheek expression change (>1 = livelier, less stern)"},
                        "driving_license": {"type": "string", "description": "Required with an explicit driving_video outside the profile: its licence/provenance"}},
     }
@@ -100,7 +101,7 @@ class TwinPerformanceTransfer(BaseTool):
                 import tempfile
 
                 with tempfile.TemporaryDirectory() as td:
-                    res = liveportrait_runner.animate(src, driving, Path(td), lock_eyes=bool(inputs.get("lock_eyes")), expression_gain=float(inputs.get("expression_gain", 1.0)))
+                    res = liveportrait_runner.animate(src, driving, Path(td), lock_eyes=bool(inputs.get("lock_eyes")), lock_scale=bool(inputs.get("lock_scale")), expression_gain=float(inputs.get("expression_gain", 1.0)))
                     out.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(res["output"], out)
         except (RuntimeError, HeavyJobBusy) as exc:

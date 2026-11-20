@@ -115,3 +115,23 @@ def mouth_series_from_video(video: Path, fps: float = 25.0) -> np.ndarray:
             prev = mouth_openness(lm) if lm is not None else prev
             vals.append(prev)
     return np.array(vals, dtype=np.float32)
+
+
+def face_width_series_from_video(video: Path, fps: float = 5.0) -> np.ndarray:
+    """Face width (px, cheek to cheek) per sampled frame; NaN where no face is found. Used by the face-scale QA check."""
+    import subprocess
+    import tempfile
+
+    out: list[float] = []
+    with tempfile.TemporaryDirectory() as td:
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(video), "-vf", f"fps={fps}", str(Path(td) / "f_%05d.jpg")], check=True, timeout=900)
+        for f in sorted(Path(td).glob("f_*.jpg")):
+            im = Image.open(f).convert("RGB")
+            lm = face_landmarks(im)
+            if lm is None:
+                out.append(float("nan"))
+                continue
+            w, h = im.size
+            px = lm[:, :2] * np.array([w, h], dtype=np.float32)
+            out.append(float(np.linalg.norm(px[234] - px[454])))
+    return np.array(out, dtype=np.float32)

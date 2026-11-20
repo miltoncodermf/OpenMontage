@@ -55,6 +55,25 @@ def pdir() -> Path:
 
 
 def stage_narration() -> dict:
+    variant = os.environ.get("BAKEOFF_VOICE_VARIANT")  # a voice variant not (yet) baked into the profile: synthesize via a scratch copy
+    if variant:
+        from lib import chatterbox_voice, voice_lab as vl
+        from lib.heavy_lock import heavy_job
+
+        d = pdir()
+        base = json.loads((d / "voice" / "voice_profile.json").read_text())
+        v = vl.VOICE_VARIANTS[variant]
+        base.update({"owner_ref": v["reference"], "voice_variant": variant, "speed": base.get("speed", 0.95)})
+        scratch = d / "derived" / f"bakeoff_{variant}_voice_profile.json"
+        scratch.parent.mkdir(exist_ok=True)
+        scratch.write_text(json.dumps(base))
+        try:
+            with heavy_job("bakeoff_narration", wait=900):
+                rep = chatterbox_voice.synthesize_narration(scratch, TEXT, NARRATION)
+        finally:
+            scratch.unlink(missing_ok=True)
+        (OUT / "narration.txt").write_text(TEXT)
+        return {"voice_variant": variant, "takes": rep["takes"], "rerolled": rep["rerolled"], "incomplete_sentences": rep["incomplete_sentences"]}
     from tools.tool_registry import registry
 
     registry.discover()
@@ -122,7 +141,7 @@ def stage_liveportrait() -> dict:
     portrait = (d / PORTRAIT) if PORTRAIT else pp.default_portrait(PROFILE)
     res = TwinPerformanceTransfer().execute({"profile_id": PROFILE, "variant_id": VARIANT, "variant_image": str(portrait),
                                              "driving_video": str(d / "derived" / "driving_performance_seg.mp4"),
-                                             "lock_eyes": True, "expression_gain": EXPRESSION_GAIN})
+                                             "lock_eyes": True, "lock_scale": True, "expression_gain": EXPRESSION_GAIN})
     if not res.success:
         raise SystemExit(f"liveportrait failed: {res.error}")
     out = Path(res.data["output"])
@@ -131,7 +150,7 @@ def stage_liveportrait() -> dict:
                     "-pix_fmt", "yuv420p", str(tmp)], check=True)
     tmp.replace(out)
     out.chmod(0o600)
-    return {**res.data, "lock_eyes": True, "expression_gain": EXPRESSION_GAIN, "held_frames_trimmed": HOLD_FRAMES}
+    return {**res.data, "lock_eyes": True, "lock_scale": True, "expression_gain": EXPRESSION_GAIN, "held_frames_trimmed": HOLD_FRAMES}
 
 
 def stage_lipsync() -> dict:
@@ -224,8 +243,21 @@ def stage_render(layout: str) -> dict:
             "cut_has_backdrop": any("presenterBackdrop" in c for c in compiled["cuts"]), "layout_warning": [c.get("layoutWarning") for c in compiled["cuts"] if c.get("layoutWarning")]}
 
 
+def stage_qa_render() -> dict:
+    """Face-scale check on the finished full-screen render (catches LivePortrait lean-in and any compositor zoom)."""
+    from lib.presenter_qa import check_face_scale, default_face_width_series
+
+    res = {}
+    for layout in ("full", "pip"):
+        r = OUT / f"render_{layout}.mp4"
+        if r.exists():
+            res[layout] = check_face_scale(r, default_face_width_series())
+    (OUT / "qa_render.json").write_text(json.dumps(res, indent=2))
+    return res
+
+
 STAGES = {"narration": stage_narration, "driving": stage_driving, "liveportrait": stage_liveportrait, "lipsync": stage_lipsync,
-          "matte": stage_matte, "qa": stage_qa}
+          "matte": stage_matte, "qa": stage_qa, "qa_render": stage_qa_render}
 
 
 def run_stage(argv: list[str]) -> dict:
@@ -251,7 +283,7 @@ def main() -> None:
     if a.stage == "all":
         rp = OUT / "results.json"
         results = json.loads(rp.read_text()) if rp.exists() else {}
-        plan = [[s] for s in STAGES] + [["render", "--layout", "pip"], ["render", "--layout", "full"]]
+        plan = [[s] for s in STAGES if s != "qa_render"] + [["render", "--layout", "pip"], ["render", "--layout", "full"], ["qa_render"]]
         for argv in plan:
             key = "_".join(argv).replace("--", "")
             if results.get(key, {}).get("returncode") == 0:

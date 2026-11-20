@@ -1881,7 +1881,7 @@ class TestV3PresenterQA:
         good = {"asset_id": "p", "asset_type": "presenter_video", "path": "assets/presenter/x.mp4", "identity_transform": "beautified", "profile_id": "owner"}
         rep = presenter_qa_report(good, clip, audio, 30.0, [], use_defaults=False)  # no providers -> honest not_run
         assert rep["passed"] is False and rep["verdict"] == "incomplete"
-        assert set(rep["not_run"]) == {"face_presence", "mouth_sync", "no_raw_frames"} and rep["failed"] == []
+        assert set(rep["not_run"]) == {"face_presence", "mouth_sync", "face_scale", "no_raw_frames"} and rep["failed"] == []
         # with injected providers it can pass; a failing identity fails outright
         rep2 = presenter_qa_report(good, clip, audio, 30.0, [], detector=lambda im: True,
                                    mouth_series=lambda v: __import__("numpy").abs(__import__("numpy").sin(__import__("numpy").arange(30) / 3)))
@@ -3492,7 +3492,8 @@ class TestVoiceVariants:
     def test_variants_table_is_consistent_with_chains_and_refs(self):
         from lib import voice_lab as vl
 
-        assert set(vl.VOICE_VARIANTS) == {"current", "clean_ref", "clean_ref_fuller", "clean_ref_fuller_dereverb"}
+        assert set(vl.VOICE_VARIANTS) == {"current", "clean_ref", "mic2", "mic2_clean", "clean_ref_fuller", "clean_ref_fuller_dereverb"}
+        assert vl.VOICE_VARIANTS["mic2"]["raw"] == vl.VOICE_VARIANTS["mic2_clean"]["raw"] == "voice_read_v2.m4a"  # second recording, raw never edited
         for name, v in vl.VOICE_VARIANTS.items():
             assert v["polish"] in vl.POLISH_CHAINS and v["reference"].startswith("raw/working/") and v["stretch"] in ("ffmpeg", "rubberband-r3")
         assert vl.VOICE_VARIANTS["current"]["tilt_eq"] is None and vl.VOICE_VARIANTS["clean_ref_fuller_dereverb"]["output_dereverb"]["rt60"] == 0.5
@@ -3602,3 +3603,50 @@ class TestLivePortraitEyeLockAndGain:
         monkeypatch.setattr(lr.subprocess, "run", fake_run)
         lr.animate(tmp_path / "s.png", tmp_path / "d.mp4", tmp_path, lock_eyes=True, expression_gain=1.5)
         assert "--lock-eyes" in seen["cmd"] and seen["cmd"][seen["cmd"].index("--expression-gain") + 1] == "1.5"
+
+
+class TestFaceScaleStability:
+    """Owner feedback: the head visibly resized towards the end (LivePortrait lean-in + a 4 % compositor push-in)."""
+
+    def test_steady_face_passes_and_growing_face_fails(self, tmp_path):
+        import numpy as np
+
+        from lib.presenter_qa import check_face_scale
+
+        v = tmp_path / "v.mp4"
+        steady = lambda _v: 290 + np.random.default_rng(0).normal(0, 1.5, 100)  # 20 s at 5 fps, jitter only
+        growing = lambda _v: 290 * (1 + 0.05 * np.linspace(0, 1, 100))  # +5 % push-in
+        assert check_face_scale(v, steady)["passed"] is True
+        res = check_face_scale(v, growing)
+        assert res["passed"] is False and res["variation"] > 0.03
+        assert check_face_scale(v, None)["status"] == "not_run"  # never a silent pass
+
+    def test_qa_report_includes_face_scale(self, tmp_path):
+        import numpy as np
+
+        from lib.presenter_qa import presenter_qa_report
+
+        clip = _moving_clip(tmp_path / "c.mp4", seconds=1.0, size="320x180")
+        good = {"asset_id": "p", "asset_type": "presenter_video", "path": "assets/presenter/x.mp4", "identity_transform": "beautified", "profile_id": "owner"}
+        rep = presenter_qa_report(good, clip, clip, 30.0, [], use_defaults=False, width_series=lambda v: np.linspace(280, 320, 50))
+        assert rep["checks"]["face_scale"]["passed"] is False and "face_scale" in rep["failed"]
+
+    def test_lock_scale_makes_every_frame_use_the_first_scale(self):
+        import numpy as np
+
+        from lib import _liveportrait_worker as w
+
+        tpl = {"motion": [{"exp": np.zeros((1, 21, 3), "float32"), "scale": np.array([[0.5 + 0.01 * i]], "float32")} for i in range(5)],
+               "c_eyes_lst": [np.array([[0.5, 0.5]])] * 5}
+
+        class Pipe:
+            def make_motion_template(self, *a, **k):
+                return tpl
+
+        w._install_template_edits(Pipe, lock_eyes=False, gain=1.0, lock_scale=True)
+        out = Pipe().make_motion_template(None, None, None)["motion"]
+        assert all(float(m["scale"][0, 0]) == 0.5 for m in out)
+
+    def test_alpha_presenter_has_no_push_in(self):
+        src = (Path(__file__).resolve().parents[2] / "remotion-composer/src/components/PresenterFullScreen.tsx").read_text()
+        assert "alpha ? 1.0 : 1.0 + progress * 0.04" in src

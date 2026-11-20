@@ -72,11 +72,13 @@ EYES_IDX = [11, 13, 15, 16, 18]  # LivePortrait expression keypoints of the eyes
 LIP_IDX = [6, 12, 14, 17, 19, 20]  # mouth keypoints: MuseTalk repaints the mouth, so they are left alone
 
 
-def _install_template_edits(pipeline_cls, *, lock_eyes: bool, gain: float) -> None:
+def _install_template_edits(pipeline_cls, *, lock_eyes: bool, gain: float, lock_scale: bool = False) -> None:
     """Edit the driving clip's expression template before animation.
 
     lock_eyes: every frame's eye keypoints become the open-eye median, so the twin never blinks or rolls its eyes
     up and keeps looking straight at the viewer (relative motion then adds zero eye change).
+    lock_scale: every frame gets the first frame's head scale, so the twin's head never grows or shrinks when the owner
+    leaned toward the camera (LivePortrait applies scale relative to the first driving frame).
     gain: scale the brow/cheek expression change relative to the first driving frame (>1 = livelier, less stern).
     """
     original = pipeline_cls.make_motion_template
@@ -89,6 +91,9 @@ def _install_template_edits(pipeline_cls, *, lock_eyes: bool, gain: float) -> No
             e0 = motion[0]["exp"][:, other, :].copy()
             for m in motion:
                 m["exp"][:, other, :] = e0 + gain * (m["exp"][:, other, :] - e0)
+        if lock_scale:
+            for m in motion:
+                m["scale"] = motion[0]["scale"].copy()
         if lock_eyes:
             ratio = np.array([float(np.mean(c)) for c in tpl["c_eyes_lst"]])
             open_frames = [i for i in range(len(ratio)) if ratio[i] >= np.median(ratio)]
@@ -109,6 +114,7 @@ def main() -> None:
     ap.add_argument("--half", action="store_true")
     ap.add_argument("--no-pasteback", action="store_true")
     ap.add_argument("--expression-gain", type=float, default=1.0, help="scale the driving brow/cheek expression change relative to its first frame (>1 = livelier)")
+    ap.add_argument("--lock-scale", action="store_true", help="keep the head size constant: ignore the driving clip's lean-in/lean-out")
     ap.add_argument("--lock-eyes", action="store_true", help="drop blinks and eye/gaze motion from the driving clip (eyes stay as in the portrait)")
     a = ap.parse_args()
 
@@ -126,8 +132,8 @@ def main() -> None:
                           flag_use_half_precision=a.half, flag_pasteback=not a.no_pasteback)
     inf = InferenceConfig(flag_use_half_precision=a.half, flag_pasteback=not a.no_pasteback)
     crop = CropConfig()
-    if a.lock_eyes or a.expression_gain != 1.0:
-        _install_template_edits(LivePortraitPipeline, lock_eyes=a.lock_eyes, gain=a.expression_gain)
+    if a.lock_eyes or a.lock_scale or a.expression_gain != 1.0:
+        _install_template_edits(LivePortraitPipeline, lock_eyes=a.lock_eyes, gain=a.expression_gain, lock_scale=a.lock_scale)
     pipe = LivePortraitPipeline(inference_cfg=inf, crop_cfg=crop)
     out = pipe.execute(args)
     print("LP_OUTPUT", out)

@@ -268,6 +268,10 @@ class VoiceLab(BaseTool):
         if variant not in vl.VOICE_VARIANTS:
             return ToolResult(success=False, error=f"unknown voice variant {variant!r}; have {sorted(vl.VOICE_VARIANTS)}")
         var = vl.VOICE_VARIANTS[variant]
+        if var.get("raw"):  # a later recording than raw/voice_read.*
+            raw_voice = d / "raw" / var["raw"]
+            if not raw_voice.is_file():
+                return ToolResult(success=False, error=f"raw/{var['raw']} missing — variant {variant!r} needs it")
         ref = d / var["reference"]
         if not ref.is_file():
             if var["tilt_eq"] is None:
@@ -275,7 +279,7 @@ class VoiceLab(BaseTool):
             else:  # cleaned working copy of the owner's read (the raw file is never modified)
                 from lib import voice_clean
 
-                voice_clean.make_clean_reference(raw_voice, ref, tilt_eq=bool(var["tilt_eq"]))
+                voice_clean.make_clean_reference(raw_voice, ref, tilt_eq=bool(var["tilt_eq"]), **(var.get("clean") or {}))
         donors_dir = d / "voice" / "donors"
         donors_dir.mkdir(parents=True, exist_ok=True)
         donors_dir.chmod(0o700)

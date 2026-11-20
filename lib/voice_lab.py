@@ -50,6 +50,11 @@ POLISH_CHAINS = {POLISH_CHAIN["name"]: POLISH_CHAIN, POLISH_CHAIN_V2["name"]: PO
 VOICE_VARIANTS = {
     "current": {"reference": "raw/working/voice_ref.wav", "tilt_eq": None, "polish": "om-voice-polish-v1", "stretch": "ffmpeg", "output_dereverb": None},
     "clean_ref": {"reference": "raw/working/voice_ref_clean.wav", "tilt_eq": False, "polish": "om-voice-polish-v1", "stretch": "rubberband-r3", "output_dereverb": None},
+    # Second recording (new condenser mic, smaller soft room, 10 s of silence first): raw/voice_read_v2.m4a
+    "mic2": {"reference": "raw/working/voice2_ref.wav", "raw": "voice_read_v2.m4a", "tilt_eq": None, "polish": "om-voice-polish-v1",
+             "stretch": "rubberband-r3", "output_dereverb": None},
+    "mic2_clean": {"reference": "raw/working/voice2_ref_clean.wav", "raw": "voice_read_v2.m4a", "tilt_eq": False, "polish": "om-voice-polish-v1",
+                   "stretch": "rubberband-r3", "output_dereverb": None, "clean": {"reduction_db": 8.0, "rt60": 0.3, "strength": 1.0}},
     "clean_ref_fuller": {"reference": "raw/working/voice_ref_clean_eq.wav", "tilt_eq": True, "polish": "om-voice-polish-v2", "stretch": "rubberband-r3", "output_dereverb": None},
     "clean_ref_fuller_dereverb": {"reference": "raw/working/voice_ref_clean_eq.wav", "tilt_eq": True, "polish": "om-voice-polish-v2", "stretch": "rubberband-r3",
                                   "output_dereverb": {"rt60": 0.5, "strength": 1.0}},

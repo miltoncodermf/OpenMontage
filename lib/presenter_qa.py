@@ -19,6 +19,7 @@ from PIL import Image
 FACE_PRESENCE_MIN = 0.98
 MAX_OFFSET_FRAMES = 2
 RAW_HASH_MAX_DISTANCE = 6  # of 256 bits
+FACE_SCALE_MAX_VARIATION = 0.03  # head size may vary at most ~3% over the clip (owner feedback: head resizing)
 
 
 def dhash(img: Image.Image, size: int = 16) -> int:
@@ -128,6 +129,29 @@ def check_mouth_sync(video: Path, audio: Path, fps: float,
     return {"status": "run", "passed": abs(res["offset_frames"]) <= MAX_OFFSET_FRAMES, **res, "limit": MAX_OFFSET_FRAMES}
 
 
+def check_face_scale(video: Path, width_series: Callable[[Path], np.ndarray] | None, max_variation: float = FACE_SCALE_MAX_VARIATION,
+                     fps: float = 5.0) -> dict[str, Any]:
+    """The face must keep its size: (max - min) of the 1-second median face widths over their overall median <= ``max_variation``
+    (a steady lean or zoom shows up as a trend, a nod only as brief jitter that the 1 s median removes)."""
+    if width_series is None:
+        return {"status": "not_run", "passed": None, "reason": "no face-width provider available (install mediapipe)"}
+    w = np.asarray(width_series(video), dtype=float)
+    step = max(1, int(round(fps)))
+    meds = [float(np.nanmedian(w[i:i + step])) for i in range(0, len(w), step) if np.isfinite(w[i:i + step]).sum() >= max(1, step // 2)]
+    if len(meds) < 3:
+        return {"status": "not_run", "passed": None, "reason": "fewer than 3 seconds with a detectable face"}
+    ref = float(np.median(meds))
+    var = (max(meds) - min(meds)) / ref
+    return {"status": "run", "passed": var <= max_variation, "variation": round(var, 4), "threshold": max_variation,
+            "min_width_px": round(min(meds), 1), "max_width_px": round(max(meds), 1), "seconds": len(meds)}
+
+
+def default_face_width_series() -> Callable[[Path], np.ndarray] | None:
+    from lib import face_tools
+
+    return face_tools.face_width_series_from_video if face_tools.mediapipe_available()[0] else None
+
+
 def default_detector() -> Callable[[Image.Image], bool] | None:
     """MediaPipe face detector when installed and its small model files are present, else None (-> not_run)."""
     from lib import face_tools
@@ -142,12 +166,14 @@ def default_mouth_series() -> Callable[[Path], np.ndarray] | None:
 
 
 def presenter_qa_report(asset: dict[str, Any], clip: Path, audio: Path, fps: float, raw_videos: Sequence[Path],
-                        detector: Callable | None = None, mouth_series: Callable | None = None, use_defaults: bool = True) -> dict[str, Any]:
+                        detector: Callable | None = None, mouth_series: Callable | None = None, use_defaults: bool = True,
+                        width_series: Callable | None = None) -> dict[str, Any]:
     from lib.presenter_guard import presenter_asset_problems
 
     if use_defaults:  # real MediaPipe checks unless the caller injected its own (tests) or opted out
         detector = detector or default_detector()
         mouth_series = mouth_series or default_mouth_series()
+        width_series = width_series or default_face_width_series()
 
     problems = presenter_asset_problems(asset)
     checks = {
@@ -155,6 +181,7 @@ def presenter_qa_report(asset: dict[str, Any], clip: Path, audio: Path, fps: flo
                      **({"standin": True} if asset.get("standin") else {})},
         "face_presence": check_face_presence(clip, detector),
         "mouth_sync": check_mouth_sync(clip, audio, fps, mouth_series),
+        "face_scale": check_face_scale(clip, width_series),
         "no_raw_frames": check_no_raw_frames(clip, raw_videos),
     }
     failed = [k for k, v in checks.items() if v["passed"] is False]
