@@ -81,6 +81,19 @@ CHATTERBOX_BLENDS = [
     {"candidate_id": "c4_owner60_lively", "owner_weight": 0.6, "donors": [{"voice": "am_fenrir", "weight": 0.4}], "exaggeration": 0.7, "cfg": 0.4, "pitch_semitones": 0.5},
 ]
 
+# Owner decision after the second recording: the owner's own voice only, no donor voice and no blend. Not one of the
+# 8 lab candidates; it is built on request (lock_voice candidate="c5_owner100").
+OWNER_ONLY_BLENDS = [
+    {"candidate_id": "c5_owner100", "owner_weight": 1.0, "donors": [], "exaggeration": 0.5, "cfg": 0.5, "pitch_semitones": 0.0},
+]
+
+
+def find_chatterbox_recipe(candidate_id: str) -> dict[str, Any]:
+    for r in [*CHATTERBOX_BLENDS, *OWNER_ONLY_BLENDS]:
+        if r["candidate_id"] == candidate_id:
+            return r
+    raise KeyError(f"no chatterbox recipe {candidate_id!r}")
+
 
 def validate_kokoro_recipe(rec: dict[str, Any]) -> None:
     voices = rec.get("voices") or []

@@ -3650,3 +3650,26 @@ class TestFaceScaleStability:
     def test_alpha_presenter_has_no_push_in(self):
         src = (Path(__file__).resolve().parents[2] / "remotion-composer/src/components/PresenterFullScreen.tsx").read_text()
         assert "alpha ? 1.0 : 1.0 + progress * 0.04" in src
+
+
+class TestOwnerOnlyVoice:
+    """Owner decision: 100 % own voice from the second recording, no donor voice at all."""
+
+    def test_owner_only_recipe_is_valid_and_has_no_donors(self):
+        from lib import voice_lab as vl
+
+        rec = vl.find_chatterbox_recipe("c5_owner100")
+        vl.validate_chatterbox_recipe(rec)
+        assert rec["owner_weight"] == 1.0 and rec["donors"] == []
+        assert "c5_owner100" not in {r["candidate_id"] for r in vl.CHATTERBOX_BLENDS}  # not one of the 8 lab candidates
+        with pytest.raises(KeyError):
+            vl.find_chatterbox_recipe("nope")
+
+    def test_worker_blend_of_a_single_voice_is_that_voice(self):
+        import torch
+
+        from lib import _chatterbox_worker as w
+
+        e = torch.randn(1, 256)
+        out = w._blend([e], [1.0])
+        assert torch.allclose(out, e, atol=1e-5)

@@ -257,7 +257,7 @@ class VoiceLab(BaseTool):
         from lib import chatterbox_voice
 
         d = pp.profile_dir(pid)
-        rec = next(r for r in vl.CHATTERBOX_BLENDS if r["candidate_id"] == candidate)
+        rec = vl.find_chatterbox_recipe(candidate)
         vl.validate_chatterbox_recipe(rec)
         ok, why = chatterbox_runner_available()
         if not ok:
@@ -320,7 +320,7 @@ class VoiceLab(BaseTool):
         d = pp.profile_dir(pid)
         rec = next((r for r in vl.KOKORO_BLENDS if r["candidate_id"] == candidate), None)
         if rec is None:
-            if any(r["candidate_id"] == candidate for r in vl.CHATTERBOX_BLENDS):
+            if any(r["candidate_id"] == candidate for r in [*vl.CHATTERBOX_BLENDS, *vl.OWNER_ONLY_BLENDS]):
                 return self._lock_chatterbox(pid, candidate, speed, variant)
             return ToolResult(success=False, error=f"candidate {candidate!r} is not a built candidate")
         wav = d / "voice" / "candidates" / f"{candidate}.wav"
