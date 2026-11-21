@@ -74,7 +74,7 @@ def resolve_profile(prof_path: Path) -> dict[str, Any]:
         raise FileNotFoundError("locked voice references missing: " + ", ".join(missing))
     recipe = prof["recipe"]
     cand = {"candidate_id": prof["candidate_id"], "owner_weight": recipe["owner_weight"], "donors": recipe["donors"],
-            "exaggeration": recipe["exaggeration"], "cfg": recipe["cfg"], "pitch_semitones": recipe.get("pitch_semitones", 0.0)}
+            "exaggeration": recipe["exaggeration"], "cfg": recipe["cfg"], "pitch_semitones": recipe.get("pitch_semitones", 0.0), "pitch_method": recipe.get("pitch_method")}
     return {"profile": prof, "owner_ref": owner, "donor_refs": donors, "candidate": cand,
             "speed": float(prof.get("speed", 1.0)), "seed": int(prof.get("seed", 1234))}
 
@@ -132,8 +132,11 @@ def synthesize_narration(prof_path: Path, text: str, out_path: Path, *, workdir:
         if abs(pitch) > 1e-6:
             src0, src = src, work / "pitched.wav"
             f = 2 ** (pitch / 12)
-            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src0), "-af",
-                            f"asetrate={int(sr * f)},aresample={sr},atempo={1 / f:.6f}", str(src)], check=True, timeout=600)
+            if cand.get("pitch_method") == "formant":  # rubberband R3, formants kept: lowers the pitch without darkening the voice
+                subprocess.run(["rubberband", "-3", "-q", "-p", f"{pitch:.3f}", "-F", str(src0), str(src)], check=True, timeout=600, capture_output=True)
+            else:
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src0), "-af",
+                                f"asetrate={int(sr * f)},aresample={sr},atempo={1 / f:.6f}", str(src)], check=True, timeout=600)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         chain = r["profile"].get("polish_chain", {}).get("name") or vl.POLISH_CHAIN["name"]
         r3 = r["profile"].get("stretch_engine") == "rubberband-r3"

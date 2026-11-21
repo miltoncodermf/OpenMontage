@@ -3673,3 +3673,50 @@ class TestOwnerOnlyVoice:
         e = torch.randn(1, 256)
         out = w._blend([e], [1.0])
         assert torch.allclose(out, e, atol=1e-5)
+
+
+class TestFormantPreservingPitchShift:
+    def test_formant_method_uses_rubberband_and_default_stays_asetrate(self, tmp_path, monkeypatch):
+        import numpy as np
+        import soundfile as sf
+
+        from lib import chatterbox_runner as cr
+        from lib import chatterbox_voice as cv
+        from lib import voice_lab as vl
+
+        calls = []
+        import subprocess as _sp
+
+        real_run = _sp.run
+        monkeypatch.setattr(_sp, "run", lambda cmd, **k: calls.append(cmd) or real_run(["true"]))
+
+        def fake_synth(owner, donors, cands, sentences, out_dir, **kw):
+            out = Path(out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            chunks = []
+            for i, s_ in enumerate(sentences):
+                f = out / f"{i}.wav"
+                sf.write(str(f), np.zeros(24000, dtype="float32"), 24000)
+                chunks.append({"idx": i, "raw": str(f), "seed": 1, "sr": 24000, "text": s_, "seconds": 0, "audio_s": 1.0})
+            return {"candidates": [{"candidate_id": cands[0]["candidate_id"], "sr": 24000, "weights": [1], "chunks": chunks}]}
+
+        for method, tool in (("formant", "rubberband"), (None, "ffmpeg")):
+            root = tmp_path / str(method)
+            (root / "voice").mkdir(parents=True)
+            (root / "raw" / "working").mkdir(parents=True)
+            (root / "raw/working/r.wav").write_bytes(b"x")
+            prof = {"version": "1.0", "engine": "chatterbox", "candidate_id": "x", "seed": 1, "owner_ref": "raw/working/r.wav", "donor_refs": {}, "speed": 1.0,
+                    "recipe": {"owner_weight": 1.0, "donors": [], "exaggeration": 0.5, "cfg": 0.5, "pitch_semitones": -3.0, "pitch_method": method},
+                    "polish_chain": {"name": "om-voice-polish-v1"}, "stretch_engine": "ffmpeg"}
+            pj = root / "voice" / "voice_profile.json"
+            pj.write_text(json.dumps(prof))
+            calls.clear()
+            monkeypatch.setattr(cr, "available", lambda: (True, "ok"))
+            monkeypatch.setattr(cr, "synthesize", fake_synth)
+            monkeypatch.setattr(vl, "asr_coverage", lambda w, t, model_size="base": {"coverage": 1.0, "heard": t})
+            monkeypatch.setattr(vl, "polish", lambda src, dst, tempo=1.0, chain=None, r3=False: sf.write(str(dst), np.zeros(4800, dtype="float32"), 48000))
+            try:
+                cv.synthesize_narration(pj, "One sentence here.", root / "o.wav")
+            except Exception:
+                pass
+            assert any(c[0] == tool for c in calls if isinstance(c, list))
