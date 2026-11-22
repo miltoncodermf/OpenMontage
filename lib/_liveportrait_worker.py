@@ -91,7 +91,7 @@ def _smooth(x, sigma_frames: float):
 def edit_template(tpl: dict, *, lock_eyes: bool = False, gain: float = 1.0, lock_scale: bool = False, pose_smooth_s: float = 0.0,
                   pose_damp: float = 1.0, max_rot_deg: float = 0.0, max_trans_sigma: float = 0.0, exp_smooth_s: float = 0.0,
                   blinks: bool = False, blink_seed: int = 7, blink_gap_s: tuple = (3.0, 6.5), blink_depth: tuple = (0.8, 1.0), blink_double_prob: float = 0.15,
-                  hold_frames: int = 0, fps: float = 25.0) -> dict:
+                  hold_frames: int = 0, fps: float = 25.0, blink_model: dict | None = None) -> dict:
     """Edit the driving template in place before animation (pure function so it can be tested without LivePortrait).
 
     lock_eyes: every frame's eye keypoints become the open-eye median (no gaze wander, no real blinks);
@@ -101,6 +101,8 @@ def edit_template(tpl: dict, *, lock_eyes: bool = False, gain: float = 1.0, lock
     pose_smooth_s / pose_damp / max_rot_deg / max_trans_sigma: low-pass the head rotation and translation, damp their amplitude around the
       clip mean and cap the drift (rotation in degrees, translation in standard deviations);
     exp_smooth_s / gain: low-pass the brow/cheek expression and scale its change around the clip mean (gain < 1 = calmer brows);
+    blink_model: the owner's real blink curves (lib/blink_model.py); the eyelid trajectory is rendered later by LivePortrait's eye retargeting
+      (apply_blink_delta), which closes both lids evenly, instead of interpolating eye keypoints;
     hold_frames: the first frames are replaced by the clip-mean pose/expression so LivePortrait's relative motion is measured against
       the average, not against whatever the first frame happened to be (the caller trims those frames from the output).
     """
@@ -152,7 +154,11 @@ def edit_template(tpl: dict, *, lock_eyes: bool = False, gain: float = 1.0, lock
         closed = motion[int(np.argmin(np.where(np.arange(n) >= h, ratio, 9)))]["exp"][:, EYES_IDX, :].copy()
         for m in motion:
             m["exp"][:, EYES_IDX, :] = ref
-        if blinks:
+        if blink_model is not None:
+            from lib import blink_model as bm
+
+            _BLINK.update({"L": bm.schedule(blink_model, n, fps, hold_frames=h, seed=blink_seed), "i": 0})
+        elif blinks:
             rng = np.random.default_rng(blink_seed)
             seconds = (n - h) / fps
             t = 1.4 + rng.uniform(0, 1.2)
@@ -196,6 +202,53 @@ def _install_template_edits(pipeline_cls, *, lock_eyes: bool = False, gain: floa
     pipeline_cls.make_motion_template = patched
 
 
+_BLINK: dict = {"L": None, "i": 0, "src_lmk": None}  # eyelid-opening trajectory per frame (1 = open) and the frame counter of warp_decode calls
+
+
+def _eye_close_ratio(lmk):
+    from src.utils.retargeting_utils import calc_eye_close_ratio  # LivePortrait's own helper (path set up in main)
+
+    return calc_eye_close_ratio(lmk[None])
+
+
+def apply_blink_delta(wrapper, kp_source, kp_driving, lid: float, src_lmk, ratio_fn=None):
+    """Add LivePortrait's symmetric eye-retargeting delta so the lids reach ``lid`` (1 = as open as the portrait, 0 = shut) on this frame."""
+    import torch
+
+    ratio_fn = ratio_fn or _eye_close_ratio
+    c_s = np.asarray(ratio_fn(src_lmk), dtype=np.float32).reshape(1, -1)[:, :2]  # [left, right] of the portrait
+    c_open = float(c_s[0, 0])
+
+    def combined(c_d: float):
+        return torch.from_numpy(np.concatenate([c_s, [[c_d]]], axis=1).astype(np.float32)).to(kp_source.device)
+
+    delta = wrapper.retarget_eye(kp_source, combined(c_open * lid)) - wrapper.retarget_eye(kp_source, combined(c_open))
+    return kp_driving + delta.to(kp_driving.dtype)
+
+
+def _install_blink_retarget(pipe) -> None:
+    wrapper, cropper = pipe.live_portrait_wrapper, pipe.cropper
+    orig_crop = cropper.crop_source_image
+
+    def crop(img, cfg):
+        info = orig_crop(img, cfg)
+        if info is not None:
+            _BLINK["src_lmk"] = info["lmk_crop"]
+        return info
+
+    cropper.crop_source_image = crop
+    orig_decode = wrapper.warp_decode
+
+    def decode(feature_3d, kp_source, kp_driving):
+        i, lid = _BLINK["i"], _BLINK["L"]
+        _BLINK["i"] += 1
+        if lid is not None and i < len(lid) and lid[i] < 0.995 and _BLINK["src_lmk"] is not None:
+            kp_driving = apply_blink_delta(wrapper, kp_source, kp_driving, float(lid[i]), _BLINK["src_lmk"])
+        return orig_decode(feature_3d, kp_source, kp_driving)
+
+    wrapper.warp_decode = decode
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--lp-dir", required=True)
@@ -208,6 +261,7 @@ def main() -> None:
     ap.add_argument("--lock-scale", action="store_true", help="keep the head size constant: ignore the driving clip's lean-in/lean-out")
     ap.add_argument("--lock-eyes", action="store_true", help="drop blinks and eye/gaze motion from the driving clip (eyes stay as in the portrait)")
     ap.add_argument("--blinks", action="store_true", help="with --lock-eyes: add scripted natural blinks")
+    ap.add_argument("--blink-model", default=None, help="json with the owner's real blink curves: blinks are rendered by eye retargeting along them")
     ap.add_argument("--pose-smooth", type=float, default=0.0, help="head pose low-pass sigma in seconds")
     ap.add_argument("--pose-damp", type=float, default=1.0, help="head pose amplitude factor around the clip mean")
     ap.add_argument("--max-rot-deg", type=float, default=0.0)
@@ -230,11 +284,19 @@ def main() -> None:
                           flag_use_half_precision=a.half, flag_pasteback=not a.no_pasteback)
     inf = InferenceConfig(flag_use_half_precision=a.half, flag_pasteback=not a.no_pasteback)
     crop = CropConfig()
-    edits = {"blinks": a.blinks, "pose_smooth_s": a.pose_smooth, "pose_damp": a.pose_damp, "max_rot_deg": a.max_rot_deg,
+    blink_model = None
+    if a.blink_model:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from lib import blink_model as bm
+
+        blink_model = bm.load(Path(a.blink_model))
+    edits = {"blink_model": blink_model, "blinks": a.blinks, "pose_smooth_s": a.pose_smooth, "pose_damp": a.pose_damp, "max_rot_deg": a.max_rot_deg,
              "max_trans_sigma": a.max_trans_sigma, "exp_smooth_s": a.exp_smooth, "hold_frames": a.hold_frames}
-    if a.lock_eyes or a.lock_scale or a.expression_gain != 1.0 or a.pose_smooth or a.pose_damp != 1.0 or a.max_rot_deg or a.exp_smooth or a.hold_frames:
+    if a.lock_eyes or a.lock_scale or a.expression_gain != 1.0 or a.pose_smooth or a.pose_damp != 1.0 or a.max_rot_deg or a.exp_smooth or a.hold_frames or a.blink_model:
         _install_template_edits(LivePortraitPipeline, lock_eyes=a.lock_eyes, gain=a.expression_gain, lock_scale=a.lock_scale, **edits)
     pipe = LivePortraitPipeline(inference_cfg=inf, crop_cfg=crop)
+    if blink_model is not None:
+        _install_blink_retarget(pipe)
     out = pipe.execute(args)
     print("LP_OUTPUT", out)
 

@@ -111,8 +111,15 @@ EXPRESSION_GAIN = 1.6
 
 NATURAL = os.environ.get("BAKEOFF_NATURAL") == "1"  # long continuous driving window, calmer expression, smoothed head, natural blinks
 NATURAL_WINDOW = (36.0, 24.0)  # 33-65 s of the performance has no hands in frame
-NATURAL_ARGS = ["--blinks", "--pose-smooth", "0.35", "--pose-damp", "0.6", "--max-rot-deg", "5", "--max-trans-sigma", "1.5", "--exp-smooth", "0.25",
-                "--hold-frames", str(HOLD_FRAMES)]
+def natural_args() -> list[str]:
+    """LivePortrait worker flags for the natural driving: blinks follow the owner's own recording (derived/blink_templates.json, made by
+    lib.blink_model.extract from the lid signal of raw/working/performance.sdr.mp4), else scripted blinks."""
+    model = pdir() / "derived" / "blink_templates.json"
+    blink = ["--blink-model", str(model)] if model.is_file() else ["--blinks"]
+    return [*blink, "--pose-smooth", "0.35", "--pose-damp", "0.6", "--max-rot-deg", "5", "--max-trans-sigma", "1.5", "--exp-smooth", "0.25",
+            "--hold-frames", str(HOLD_FRAMES)]
+
+
 NATURAL_GAIN = 0.6
 
 
@@ -185,7 +192,7 @@ def stage_liveportrait() -> dict:
     driving = d / "derived" / ("driving_performance_long.mp4" if NATURAL else "driving_performance_seg.mp4")
     res = TwinPerformanceTransfer().execute({"profile_id": PROFILE, "variant_id": VARIANT, "variant_image": str(portrait), "driving_video": str(driving),
                                              "lock_eyes": True, "lock_scale": True, "expression_gain": NATURAL_GAIN if NATURAL else EXPRESSION_GAIN,
-                                             "worker_args": NATURAL_ARGS if NATURAL else []})
+                                             "worker_args": natural_args() if NATURAL else []})
     if not res.success:
         raise SystemExit(f"liveportrait failed: {res.error}")
     out = Path(res.data["output"])
@@ -194,7 +201,7 @@ def stage_liveportrait() -> dict:
                     "-pix_fmt", "yuv420p", str(tmp)], check=True)
     tmp.replace(out)
     out.chmod(0o600)
-    return {**res.data, "lock_eyes": True, "lock_scale": True, "expression_gain": NATURAL_GAIN if NATURAL else EXPRESSION_GAIN, "worker_args": NATURAL_ARGS if NATURAL else [], "held_frames_trimmed": HOLD_FRAMES}
+    return {**res.data, "lock_eyes": True, "lock_scale": True, "expression_gain": NATURAL_GAIN if NATURAL else EXPRESSION_GAIN, "worker_args": natural_args() if NATURAL else [], "held_frames_trimmed": HOLD_FRAMES}
 
 
 def stage_lipsync() -> dict:

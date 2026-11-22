@@ -3843,3 +3843,69 @@ class TestNaturalnessQA:
         rep = presenter_qa_report(good, clip, clip, 25.0, [], use_defaults=False, signals=lambda v: calls.append(v) or sig)
         assert len(calls) == 1 and rep["checks"]["face_scale"]["passed"] is True
         assert rep["checks"]["brow_repetition"]["status"] == "run" and rep["checks"]["blink_rate"]["passed"] is True
+
+
+class TestBlinksFromTheOwnersRecording:
+    """Owner: blinks still unnatural. Real blinks: drop in 1-2 frames, 2-3 frames shut, slow re-open (200-300 ms), ~13/min."""
+
+    @staticmethod
+    def _series(fps=30, seconds=40):
+        import numpy as np
+
+        lid = np.full(int(fps * seconds), 0.30)
+        for c in (60, 150, 260, 380, 520, 700, 880, 1000):  # drop in 1 frame, 2 frames shut, slow re-open
+            for k, v in enumerate([0.9, 0.03, 0.03, 0.2, 0.5, 0.72, 0.84, 0.92, 0.97]):
+                lid[c + k] = 0.30 * v
+        return lid
+
+    def test_extract_and_schedule_reproduce_the_real_shape(self):
+        import numpy as np
+
+        from lib import blink_model as bm
+
+        model = bm.extract(self._series(), 30.0)
+        assert len(model["templates"]) == 8 and all(0.02 < d < 20 for d in model["intervals_s"])
+        L = bm.schedule(model, 603, 25.0, hold_frames=3, seed=7)
+        assert (L[:3] == 1.0).all() and L.min() < 0.1
+        starts = [i for i in range(1, len(L)) if L[i] < 0.7 and L[i - 1] >= 0.7]
+        assert 3 <= len(starts) <= 9
+        i = starts[0]
+        down = sum(1 for v in L[i - 3:i + 1] if 0.1 < v < 0.9)
+        up = sum(1 for v in L[i + 1:i + 14] if 0.1 < v < 0.9)
+        assert down <= 2 and up >= 4  # fast close, slow open
+        assert np.array_equal(L, bm.schedule(model, 603, 25.0, hold_frames=3, seed=7))  # deterministic
+        assert not np.array_equal(L, bm.schedule(model, 603, 25.0, hold_frames=3, seed=8))
+
+    def test_edit_template_with_a_blink_model_keeps_eyes_locked_and_schedules_blinks(self):
+        import numpy as np
+
+        from lib import _liveportrait_worker as w
+        from lib import blink_model as bm
+
+        n = 25 * 24
+        tpl = {"motion": [{"exp": np.zeros((1, 21, 3), "float32"), "scale": np.array([[0.5]], "float32")} for _ in range(n)],
+               "c_eyes_lst": [np.array([[0.5, 0.5]])] * n}
+        tpl["motion"][30]["exp"][:, w.EYES_IDX, :] = 1.0
+        tpl["c_eyes_lst"][30] = np.array([[0.02, 0.02]])
+        out = w.edit_template(tpl, lock_eyes=True, blink_model=bm.extract(self._series(), 30.0))
+        assert float(np.abs(np.stack([m["exp"][:, w.EYES_IDX, :] for m in out["motion"]])).max()) == 0.0  # no eye keypoint motion at all
+        assert w._BLINK["L"] is not None and len(w._BLINK["L"]) == n and w._BLINK["L"].min() < 0.1
+
+    def test_blink_delta_is_zero_when_open_and_applied_when_closing(self):
+        import numpy as np
+        import torch
+
+        from lib import _liveportrait_worker as w
+
+        class Wrapper:
+            def retarget_eye(self, kp, ratio):  # stand-in for LivePortrait's module: closing ratio -> downward delta of one keypoint
+                d = torch.zeros_like(kp)
+                d[:, 11, 1] = 1.0 - ratio[:, 2] / ratio[:, 0]
+                return d
+
+        kp = torch.zeros(1, 21, 3)
+        lmk = np.zeros((203, 2), dtype=np.float32)
+        ratio = lambda l: np.array([[0.3, 0.3]], dtype=np.float32)  # noqa: E731
+        open_ = w.apply_blink_delta(Wrapper(), kp, kp.clone(), 1.0, lmk, ratio_fn=ratio)
+        shut = w.apply_blink_delta(Wrapper(), kp, kp.clone(), 0.05, lmk, ratio_fn=ratio)
+        assert float(open_.abs().max()) == 0.0 and float(shut[0, 11, 1]) > 0.9
