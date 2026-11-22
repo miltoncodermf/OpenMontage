@@ -101,6 +101,7 @@ class TwinLipsync(BaseTool):
             "motion_source": {"type": "string", "description": "idle loop or performance clip (from the profile; never raw/)"},
             "segments": {"type": "array", "items": {"type": "object", "required": ["segment_id", "audio"]}},
             "output_dir": {"type": "string"},
+            "loop_mode": {"type": "string", "enum": ["auto", "loop", "pingpong", "crossfade", "auto_crossfade"], "default": "auto", "description": "How a short motion source is extended to the audio length; crossfade dissolves the repeats instead of reversing the motion"},
             "fps": {"type": "integer", "default": 25, "description": "MuseTalk is trained at 25 fps; keep 25 for musetalk_mlx"},
         },
     }
@@ -147,7 +148,7 @@ class TwinLipsync(BaseTool):
                         continue
                     dur = twin_media.probe(audio)["duration_seconds"]
                     looped = out_dir / f"{sid}.motion.mp4"
-                    loop_info = twin_media.loop_to_duration(motion, looped, dur, fps)
+                    loop_info = twin_media.loop_to_duration(motion, looped, dur, fps, mode=inputs.get("loop_mode", "auto"))
                     try:
                         backend.lipsync(looped, audio, out)
                     finally:

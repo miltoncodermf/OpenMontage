@@ -3567,7 +3567,7 @@ class TestLivePortraitEyeLockAndGain:
         eyes = np.stack([m["exp"][:, w.EYES_IDX, :] for m in out["motion"]])
         assert np.allclose(eyes, eyes[0])  # blink frame (idx 2) and every other frame share one eye state
 
-    def test_gain_scales_brows_but_not_mouth_or_eyes(self):
+    def test_gain_scales_brows_around_the_clip_mean_but_not_mouth_or_eyes(self):
         import numpy as np
 
         from lib import _liveportrait_worker as w
@@ -3582,7 +3582,8 @@ class TestLivePortraitEyeLockAndGain:
         w._install_template_edits(Pipe, lock_eyes=False, gain=2.0)
         out = Pipe().make_motion_template(None, None, None)["motion"]
         other = [i for i in range(21) if i not in w.EYES_IDX and i not in w.LIP_IDX]
-        assert np.allclose(out[3]["exp"][:, other] - before[0][:, other], 2.0 * (before[3][:, other] - before[0][:, other]), atol=1e-5)
+        mean = np.mean([b[:, other] for b in before], axis=0)
+        assert np.allclose(out[3]["exp"][:, other] - mean, 2.0 * (before[3][:, other] - mean), atol=1e-5)
         assert np.allclose(out[3]["exp"][:, w.LIP_IDX], before[3][:, w.LIP_IDX])
         assert np.allclose(out[3]["exp"][:, w.EYES_IDX], before[3][:, w.EYES_IDX])
 
@@ -3631,7 +3632,7 @@ class TestFaceScaleStability:
         rep = presenter_qa_report(good, clip, clip, 30.0, [], use_defaults=False, width_series=lambda v: np.linspace(280, 320, 50))
         assert rep["checks"]["face_scale"]["passed"] is False and "face_scale" in rep["failed"]
 
-    def test_lock_scale_makes_every_frame_use_the_first_scale(self):
+    def test_lock_scale_gives_every_frame_one_head_size(self):
         import numpy as np
 
         from lib import _liveportrait_worker as w
@@ -3645,7 +3646,7 @@ class TestFaceScaleStability:
 
         w._install_template_edits(Pipe, lock_eyes=False, gain=1.0, lock_scale=True)
         out = Pipe().make_motion_template(None, None, None)["motion"]
-        assert all(float(m["scale"][0, 0]) == 0.5 for m in out)
+        assert len({float(m["scale"][0, 0]) for m in out}) == 1  # one head size for every frame
 
     def test_alpha_presenter_has_no_push_in(self):
         src = (Path(__file__).resolve().parents[2] / "remotion-composer/src/components/PresenterFullScreen.tsx").read_text()
@@ -3720,3 +3721,62 @@ class TestFormantPreservingPitchShift:
             except Exception:
                 pass
             assert any(c[0] == tool for c in calls if isinstance(c, list))
+
+
+class TestNaturalDrivingEdits:
+    """Owner feedback on the twin: repetitive brow movement, head resizing, not natural."""
+
+    @staticmethod
+    def _tpl(n=100, seed=0):
+        import numpy as np
+        from scipy.spatial.transform import Rotation as Rot
+
+        rng = np.random.default_rng(seed)
+        motion = []
+        for i in range(n):
+            motion.append({"exp": rng.normal(0, 0.05, (1, 21, 3)).astype("float32"),
+                           "R": Rot.from_euler("xyz", rng.normal(0, 4, 3), degrees=True).as_matrix().astype("float32")[None],
+                           "t": rng.normal(0, 0.02, (1, 3)).astype("float32"), "scale": np.array([[0.5 + 0.02 * np.sin(i / 20)]], "float32")})
+        ratio = np.full(n, 0.5)
+        ratio[40] = 0.05  # one real blink in the driving clip
+        return {"motion": motion, "c_eyes_lst": [np.array([[r, r]]) for r in ratio]}
+
+    def test_pose_smoothing_damps_and_caps_head_motion(self):
+        import numpy as np
+        from scipy.spatial.transform import Rotation as Rot
+
+        from lib import _liveportrait_worker as w
+
+        raw = self._tpl()
+        before = Rot.from_matrix(np.stack([m["R"][0] for m in raw["motion"]]))
+        spread_before = np.rad2deg((before.mean().inv() * before).magnitude())
+        out = w.edit_template(self._tpl(), pose_smooth_s=0.3, pose_damp=0.6, max_rot_deg=5.0, max_trans_sigma=1.5)
+        after = Rot.from_matrix(np.stack([m["R"][0] for m in out["motion"]]))
+        spread_after = np.rad2deg((after.mean().inv() * after).magnitude())
+        assert spread_after.max() <= 5.01 and spread_after.mean() < 0.5 * spread_before.mean()
+
+    def test_scripted_blinks_replace_the_real_ones_at_a_natural_rate(self):
+        import numpy as np
+
+        from lib import _liveportrait_worker as w
+
+        n = 25 * 22
+        tpl = {"motion": [{"exp": np.zeros((1, 21, 3), "float32"), "scale": np.array([[0.5]], "float32")} for _ in range(n)],
+               "c_eyes_lst": [np.array([[0.5, 0.5]])] * n}
+        tpl["motion"][30]["exp"][:, w.EYES_IDX, :] = 1.0  # the one real (closed-eye) frame
+        tpl["c_eyes_lst"][30] = np.array([[0.02, 0.02]])
+        out = w.edit_template(tpl, lock_eyes=True, blinks=True)
+        closed = [i for i, m in enumerate(out["motion"]) if float(np.abs(m["exp"][:, w.EYES_IDX, :]).max()) > 0.9]
+        starts = [i for k, i in enumerate(closed) if k == 0 or i - closed[k - 1] > 3]
+        assert 3 <= len(starts) <= 8 and 30 not in [s for s in starts if s < 30 and False]  # about 3-8 blinks in 22 s
+        gaps = np.diff(starts) / 25
+        assert gaps.min() >= 2.0
+
+    def test_hold_frames_become_the_clip_mean(self):
+        import numpy as np
+
+        from lib import _liveportrait_worker as w
+
+        out = w.edit_template(self._tpl(), hold_frames=3, pose_smooth_s=0.1)
+        body_mean_exp = np.mean([m["exp"] for m in out["motion"][3:]], axis=0)
+        assert np.allclose(out["motion"][0]["exp"], body_mean_exp, atol=1e-5) and np.allclose(out["motion"][2]["exp"], body_mean_exp, atol=1e-5)

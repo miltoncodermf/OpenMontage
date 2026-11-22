@@ -55,6 +55,25 @@ def pdir() -> Path:
 
 
 def stage_narration() -> dict:
+    vref = os.environ.get("BAKEOFF_VOICE_REF")  # owner-only voice from an explicit reference file (relative to the profile)
+    if vref:
+        from lib import chatterbox_voice, voice_lab as vl
+        from lib.heavy_lock import heavy_job
+
+        d = pdir()
+        base = json.loads((d / "voice" / "voice_profile.json").read_text())
+        base.update({"candidate_id": "c5_owner100", "owner_ref": vref, "donor_refs": {}, "voice_variant": f"ref:{vref}", "speed": 0.95,
+                     "recipe": {"owner_weight": 1.0, "donors": [], "exaggeration": float(os.environ.get("BAKEOFF_VOICE_EXAG", "0.5")), "cfg": 0.5, "pitch_semitones": 0.0},
+                     "polish_chain": {"name": "om-voice-polish-v1"}, "stretch_engine": "rubberband-r3"})
+        scratch = d / "derived" / "bakeoff_ref_voice_profile.json"
+        scratch.write_text(json.dumps(base))
+        try:
+            with heavy_job("bakeoff_narration", wait=900):
+                rep = chatterbox_voice.synthesize_narration(scratch, TEXT, NARRATION)
+        finally:
+            scratch.unlink(missing_ok=True)
+        (OUT / "narration.txt").write_text(TEXT)
+        return {"voice_ref": vref, "exaggeration": base["recipe"]["exaggeration"], "takes": rep["takes"], "rerolled": rep["rerolled"], "incomplete_sentences": rep["incomplete_sentences"]}
     variant = os.environ.get("BAKEOFF_VOICE_VARIANT")  # a voice variant not (yet) baked into the profile: synthesize via a scratch copy
     if variant:
         from lib import chatterbox_voice, voice_lab as vl
@@ -90,7 +109,31 @@ HOLD_FRAMES = 3  # prepended copies of the owner's sternest open-eyed frame; Liv
 EXPRESSION_GAIN = 1.6
 
 
+NATURAL = os.environ.get("BAKEOFF_NATURAL") == "1"  # long continuous driving window, calmer expression, smoothed head, natural blinks
+NATURAL_WINDOW = (36.0, 24.0)  # 33-65 s of the performance has no hands in frame
+NATURAL_ARGS = ["--blinks", "--pose-smooth", "0.35", "--pose-damp", "0.6", "--max-rot-deg", "5", "--max-trans-sigma", "1.5", "--exp-smooth", "0.25",
+                "--hold-frames", str(HOLD_FRAMES)]
+NATURAL_GAIN = 0.6
+
+
+def stage_driving_natural() -> dict:
+    d = pdir()
+    src = d / "raw" / "working" / "performance.sdr.mp4"
+    dst = d / "derived" / "driving_performance_long.mp4"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    start, length = NATURAL_WINDOW
+    first = OUT / "driving_first.png"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(start), "-i", str(src), "-frames:v", "1", str(first)], check=True)
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-loop", "1", "-t", str(HOLD_FRAMES / 25), "-framerate", "25", "-i", str(first), "-ss", str(start), "-t", str(length),
+                    "-i", str(src), "-filter_complex", "[0:v]fps=25,format=yuv420p[a];[1:v]fps=25,format=yuv420p[b];[a][b]concat=n=2:v=1[v]", "-map", "[v]",
+                    "-c:v", "libx264", "-crf", "14", str(dst)], check=True)
+    dst.chmod(0o600)
+    return {"driving": str(dst), "window_s": [start, start + length], "hold_frames": HOLD_FRAMES}
+
+
 def stage_driving() -> dict:
+    if NATURAL:
+        return stage_driving_natural()
     """Trim the driving window and put the sternest frame first (relative motion then makes every later frame livelier)."""
     import numpy as np
 
@@ -139,9 +182,10 @@ def stage_liveportrait() -> dict:
 
     d = pdir()
     portrait = (d / PORTRAIT) if PORTRAIT else pp.default_portrait(PROFILE)
-    res = TwinPerformanceTransfer().execute({"profile_id": PROFILE, "variant_id": VARIANT, "variant_image": str(portrait),
-                                             "driving_video": str(d / "derived" / "driving_performance_seg.mp4"),
-                                             "lock_eyes": True, "lock_scale": True, "expression_gain": EXPRESSION_GAIN})
+    driving = d / "derived" / ("driving_performance_long.mp4" if NATURAL else "driving_performance_seg.mp4")
+    res = TwinPerformanceTransfer().execute({"profile_id": PROFILE, "variant_id": VARIANT, "variant_image": str(portrait), "driving_video": str(driving),
+                                             "lock_eyes": True, "lock_scale": True, "expression_gain": NATURAL_GAIN if NATURAL else EXPRESSION_GAIN,
+                                             "worker_args": NATURAL_ARGS if NATURAL else []})
     if not res.success:
         raise SystemExit(f"liveportrait failed: {res.error}")
     out = Path(res.data["output"])
@@ -150,16 +194,16 @@ def stage_liveportrait() -> dict:
                     "-pix_fmt", "yuv420p", str(tmp)], check=True)
     tmp.replace(out)
     out.chmod(0o600)
-    return {**res.data, "lock_eyes": True, "lock_scale": True, "expression_gain": EXPRESSION_GAIN, "held_frames_trimmed": HOLD_FRAMES}
+    return {**res.data, "lock_eyes": True, "lock_scale": True, "expression_gain": NATURAL_GAIN if NATURAL else EXPRESSION_GAIN, "worker_args": NATURAL_ARGS if NATURAL else [], "held_frames_trimmed": HOLD_FRAMES}
 
 
 def stage_lipsync() -> dict:
     _registry()
     from tools.presenters.twin_lipsync import TwinLipsync
 
-    motion = pdir() / "performance" / f"{VARIANT}.mp4"
+    motion = (pdir() / "loops" / VARIANT / "idle.mp4") if os.environ.get("BAKEOFF_ENGINE") == "hybrid" else (pdir() / "performance" / f"{VARIANT}.mp4")
     res = TwinLipsync().execute({"backend": "musetalk_mlx", "motion_source": str(motion), "output_dir": str(OUT),
-                                 "segments": [{"segment_id": "seg1", "audio": str(NARRATION)}]})
+                                 "loop_mode": "auto_crossfade", "segments": [{"segment_id": "seg1", "audio": str(NARRATION)}]})
     if not res.success:
         raise SystemExit(f"lipsync failed: {res.error}")
     return res.data
@@ -283,7 +327,8 @@ def main() -> None:
     if a.stage == "all":
         rp = OUT / "results.json"
         results = json.loads(rp.read_text()) if rp.exists() else {}
-        plan = [[s] for s in STAGES if s != "qa_render"] + [["render", "--layout", "pip"], ["render", "--layout", "full"], ["qa_render"]]
+        hybrid = os.environ.get("BAKEOFF_ENGINE") == "hybrid"
+        plan = [[s] for s in STAGES if s != "qa_render" and not (hybrid and s in ("driving", "liveportrait"))] + [["render", "--layout", "pip"], ["render", "--layout", "full"], ["qa_render"]]
         for argv in plan:
             key = "_".join(argv).replace("--", "")
             if results.get(key, {}).get("returncode") == 0:

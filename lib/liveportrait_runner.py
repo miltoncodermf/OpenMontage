@@ -34,7 +34,7 @@ def available() -> tuple[bool, str]:
     return (True, "ok") if ok else (False, why)
 
 
-def animate(source_image: Path, driving_video: Path, out_dir: Path, *, half: bool = False, lock_eyes: bool = False, lock_scale: bool = False, expression_gain: float = 1.0, timeout_s: int = 3600) -> dict[str, Any]:
+def animate(source_image: Path, driving_video: Path, out_dir: Path, *, half: bool = False, lock_eyes: bool = False, lock_scale: bool = False, expression_gain: float = 1.0, extra_args: list[str] | None = None, timeout_s: int = 3600) -> dict[str, Any]:
     """Animate ``source_image`` with the motion of ``driving_video``. Returns {output, concat, seconds}."""
     ok, why = available()
     if not ok:
@@ -42,7 +42,7 @@ def animate(source_image: Path, driving_video: Path, out_dir: Path, *, half: boo
     out_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     cmd = [sys.executable, str(WORKER), "--lp-dir", str(lp_dir()), "--source", str(source_image), "--driving", str(driving_video),
-           "--output-dir", str(out_dir)] + (["--half"] if half else []) + (["--lock-eyes"] if lock_eyes else []) + (["--lock-scale"] if lock_scale else []) + (["--expression-gain", str(expression_gain)] if expression_gain != 1.0 else [])
+           "--output-dir", str(out_dir)] + (["--half"] if half else []) + (["--lock-eyes"] if lock_eyes else []) + (["--lock-scale"] if lock_scale else []) + (["--expression-gain", str(expression_gain)] if expression_gain != 1.0 else []) + list(extra_args or [])
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, cwd=str(lp_dir()))
     if proc.returncode != 0:
         raise RuntimeError(f"LivePortrait worker failed (exit {proc.returncode}):\n{(proc.stderr or proc.stdout)[-1500:]}")

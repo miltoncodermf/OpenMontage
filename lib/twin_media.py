@@ -76,11 +76,40 @@ def plain_loop_to_duration(src: Path, dst: Path, duration_s: float, fps: int = 3
     return dst
 
 
+def crossfade_to_duration(src: Path, dst: Path, duration_s: float, fps: int = 30, overlap_s: float = 0.7) -> Path:
+    """Repeat the clip with a cross-dissolve of ``overlap_s`` at every seam (no ping-pong, so motion never reverses). A clip that is
+    already long enough is just trimmed."""
+    import math
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    length = float(probe(src)["duration_seconds"])
+    ov = min(overlap_s, length / 3)
+    k = 1 if length >= duration_s else int(math.ceil((duration_s - length) / (length - ov))) + 1
+    if k == 1:
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-t", f"{duration_s:.3f}", "-r", str(fps), "-an", "-c:v", "libx264",
+                        "-crf", "14", "-pix_fmt", "yuv420p", str(dst)], check=True, timeout=600)
+        return dst
+    parts = "".join(f"[v{i}]" for i in range(k))
+    chain = [f"[0:v]fps={fps},setpts=PTS-STARTPTS,format=yuv420p,split={k}{parts}"]
+    prev = "v0"
+    for i in range(1, k):
+        out = f"x{i}"
+        chain.append(f"[{prev}][v{i}]xfade=transition=fade:duration={ov:.3f}:offset={i * (length - ov):.3f}[{out}]")
+        prev = out
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-an", "-filter_complex", ";".join(chain), "-map", f"[{prev}]", "-t", f"{duration_s:.3f}",
+                    "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", str(dst)], check=True, timeout=1200)
+    return dst
+
+
 def loop_to_duration(src: Path, dst: Path, duration_s: float, fps: int = 30, mode: str = "auto") -> dict[str, Any]:
-    """Loop a motion source to the narration length. ``auto`` = plain loop if the seam is clean, else ping-pong."""
-    if mode not in {"auto", "loop", "pingpong"}:
+    """Loop a motion source to the narration length. ``auto`` = plain loop if the seam is clean, else ping-pong;
+    ``auto_crossfade`` = plain loop if the seam is clean, else cross-dissolve repeats; ``crossfade`` always dissolves."""
+    if mode not in {"auto", "loop", "pingpong", "crossfade", "auto_crossfade"}:
         raise ValueError(f"unknown loop mode {mode!r}")
     score = seam_score(src)
-    chosen = "loop" if mode == "loop" or (mode == "auto" and score < SEAM_THRESHOLD) else "pingpong"
+    if mode == "crossfade" or (mode == "auto_crossfade" and score >= SEAM_THRESHOLD):
+        crossfade_to_duration(src, dst, duration_s, fps)
+        return {"mode": "crossfade", "seam_score": round(score, 4), "output": str(dst)}
+    chosen = "loop" if mode in ("loop", "auto_crossfade") or (mode == "auto" and score < SEAM_THRESHOLD) else "pingpong"
     (plain_loop_to_duration if chosen == "loop" else pingpong_to_duration)(src, dst, duration_s, fps)
     return {"mode": chosen, "seam_score": round(score, 4), "output": str(dst)}
