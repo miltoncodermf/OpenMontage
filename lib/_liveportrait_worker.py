@@ -72,7 +72,14 @@ EYES_IDX = [11, 13, 15, 16, 18]  # LivePortrait expression keypoints of the eyes
 LIP_IDX = [6, 12, 14, 17, 19, 20]  # mouth keypoints: MuseTalk repaints the mouth, so they are left alone
 
 
-BLINK_PROFILE = [(-1, 0.55), (0, 1.0), (1, 0.65), (2, 0.2)]  # frame offset around the blink centre -> how closed (25 fps: ~4 frames, 160 ms)
+def blink_weight(dt: float, close_s: float = 0.10, open_s: float = 0.18) -> float:
+    """How closed the eye is (0..1) ``dt`` seconds after the lids are fully down: eased close (fast) then eased, slower re-open."""
+    if dt <= -close_s or dt >= open_s:
+        return 0.0
+    if dt < 0:
+        u = (dt + close_s) / close_s
+        return float(0.5 - 0.5 * np.cos(np.pi * u))  # smooth start, smooth landing
+    return float(0.5 + 0.5 * np.cos(np.pi * dt / open_s))  # lids rise gently
 
 
 def _smooth(x, sigma_frames: float):
@@ -83,11 +90,13 @@ def _smooth(x, sigma_frames: float):
 
 def edit_template(tpl: dict, *, lock_eyes: bool = False, gain: float = 1.0, lock_scale: bool = False, pose_smooth_s: float = 0.0,
                   pose_damp: float = 1.0, max_rot_deg: float = 0.0, max_trans_sigma: float = 0.0, exp_smooth_s: float = 0.0,
-                  blinks: bool = False, blink_seed: int = 7, blink_gap_s: tuple = (2.4, 5.2), hold_frames: int = 0, fps: float = 25.0) -> dict:
+                  blinks: bool = False, blink_seed: int = 7, blink_gap_s: tuple = (3.0, 6.5), blink_depth: tuple = (0.8, 1.0), blink_double_prob: float = 0.15,
+                  hold_frames: int = 0, fps: float = 25.0) -> dict:
     """Edit the driving template in place before animation (pure function so it can be tested without LivePortrait).
 
     lock_eyes: every frame's eye keypoints become the open-eye median (no gaze wander, no real blinks);
-    blinks: then add short scripted blinks at natural intervals, using the driving clip's most closed eye frame;
+    blinks: then add scripted blinks at natural, jittered intervals (about 12-14 a minute): eased close in ~100 ms and a slower ~180 ms re-open, depth
+      80-100 % of the driving clip's most closed eye frame, an occasional double blink;
     lock_scale: head scale of every frame = first frame's (no growing or shrinking);
     pose_smooth_s / pose_damp / max_rot_deg / max_trans_sigma: low-pass the head rotation and translation, damp their amplitude around the
       clip mean and cap the drift (rotation in degrees, translation in standard deviations);
@@ -145,14 +154,20 @@ def edit_template(tpl: dict, *, lock_eyes: bool = False, gain: float = 1.0, lock
             m["exp"][:, EYES_IDX, :] = ref
         if blinks:
             rng = np.random.default_rng(blink_seed)
-            t = 1.4 + rng.uniform(0, 1.0)
-            while t < (n - h) / fps - 0.4:
-                centre = h + int(round(t * fps))
-                for off, w in BLINK_PROFILE:
-                    j = centre + off
-                    if h <= j < n:
-                        motion[j]["exp"][:, EYES_IDX, :] = ref + w * (closed - ref)
-                t += float(rng.uniform(*blink_gap_s))
+            seconds = (n - h) / fps
+            t = 1.4 + rng.uniform(0, 1.2)
+            while t < seconds - 0.5:
+                centres = [t]
+                if rng.uniform() < blink_double_prob:  # an occasional double blink
+                    centres.append(t + float(rng.uniform(0.28, 0.40)))
+                for c in centres:
+                    depth = float(rng.uniform(*blink_depth))  # not every blink closes completely
+                    shift = float(rng.uniform(-0.5, 0.5)) / fps  # sub-frame jitter so the frames sample the curve differently each time
+                    for j in range(h, n):
+                        w = depth * blink_weight((j - h) / fps - c - shift)
+                        if w > 1e-3:
+                            motion[j]["exp"][:, EYES_IDX, :] = ref + w * (closed - ref)
+                t = centres[-1] + float(rng.uniform(*blink_gap_s))
     # -- the held reference frames: the clip mean ---------------------------------------------------------------------
     if h > 0:
         keys = ("exp", "R", "t", "scale")

@@ -3755,22 +3755,34 @@ class TestNaturalDrivingEdits:
         spread_after = np.rad2deg((after.mean().inv() * after).magnitude())
         assert spread_after.max() <= 5.01 and spread_after.mean() < 0.5 * spread_before.mean()
 
-    def test_scripted_blinks_replace_the_real_ones_at_a_natural_rate(self):
+    def test_scripted_blinks_are_soft_varied_and_at_a_natural_rate(self):
         import numpy as np
 
         from lib import _liveportrait_worker as w
 
-        n = 25 * 22
+        n = 25 * 24
         tpl = {"motion": [{"exp": np.zeros((1, 21, 3), "float32"), "scale": np.array([[0.5]], "float32")} for _ in range(n)],
                "c_eyes_lst": [np.array([[0.5, 0.5]])] * n}
         tpl["motion"][30]["exp"][:, w.EYES_IDX, :] = 1.0  # the one real (closed-eye) frame
         tpl["c_eyes_lst"][30] = np.array([[0.02, 0.02]])
         out = w.edit_template(tpl, lock_eyes=True, blinks=True)
-        closed = [i for i, m in enumerate(out["motion"]) if float(np.abs(m["exp"][:, w.EYES_IDX, :]).max()) > 0.9]
-        starts = [i for k, i in enumerate(closed) if k == 0 or i - closed[k - 1] > 3]
-        assert 3 <= len(starts) <= 8 and 30 not in [s for s in starts if s < 30 and False]  # about 3-8 blinks in 22 s
-        gaps = np.diff(starts) / 25
-        assert gaps.min() >= 2.0
+        closed = np.array([float(np.abs(m["exp"][:, w.EYES_IDX, :]).max()) for m in out["motion"]])
+        assert closed.max() <= 1.0 + 1e-6
+        starts = [i for i in range(1, n) if closed[i] > 0.05 and closed[i - 1] <= 0.05]
+        clusters = [s_ for k, s_ in enumerate(starts) if k == 0 or (s_ - starts[k - 1]) / 25 > 0.6]  # a double blink counts once
+        assert 3 <= len(clusters) <= 9
+        assert min(np.diff(clusters)) / 25 >= 2.5
+        # soft: no single-frame jump from open to closed, and the peaks differ (varied depth)
+        assert np.abs(np.diff(closed)).max() < 0.75
+        peaks = [closed[c:c + 8].max() for c in clusters]
+        assert max(peaks) - min(peaks) > 0.02 and min(peaks) >= 0.6
+
+    def test_blink_curve_closes_faster_than_it_opens(self):
+        from lib._liveportrait_worker import blink_weight
+
+        down = sum(1 for k in range(-20, 0) if 0.02 < blink_weight(k / 100) < 0.98)
+        up = sum(1 for k in range(0, 30) if 0.02 < blink_weight(k / 100) < 0.98)
+        assert up > down and blink_weight(0.0) == 1.0 and blink_weight(-0.5) == 0.0 and blink_weight(0.5) == 0.0
 
     def test_hold_frames_become_the_clip_mean(self):
         import numpy as np
