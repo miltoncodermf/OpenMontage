@@ -45,13 +45,13 @@ class MuseTalkMLXBackend:
     name = "musetalk_mlx"
     last_info: dict[str, Any] = {}
 
-    def lipsync(self, motion_video: Path, audio: Path, out: Path) -> None:
+    def lipsync(self, motion_video: Path, audio: Path, out: Path, options: dict[str, Any] | None = None) -> None:
         from lib import musetalk_runner
 
         ok, why = twin_backends.musetalk_mlx_available()
         if not ok:
             raise BackendUnavailable(f"MuseTalk-MLX unavailable: {why}")
-        self.last_info = musetalk_runner.lipsync(motion_video, audio, out)
+        self.last_info = musetalk_runner.lipsync(motion_video, audio, out, options=options)
 
 
 class LatentSyncBackend:
@@ -101,6 +101,7 @@ class TwinLipsync(BaseTool):
             "motion_source": {"type": "string", "description": "idle loop or performance clip (from the profile; never raw/)"},
             "segments": {"type": "array", "items": {"type": "object", "required": ["segment_id", "audio"]}},
             "output_dir": {"type": "string"},
+            "lipsync_options": {"type": "object", "description": "musetalk_mlx only: open_scale, mask (oval|mouth), sharpen, mask_reach, color_match (see lib/musetalk_runner.lipsync)"},
             "loop_mode": {"type": "string", "enum": ["auto", "loop", "pingpong", "crossfade", "auto_crossfade"], "default": "auto", "description": "How a short motion source is extended to the audio length; crossfade dissolves the repeats instead of reversing the motion"},
             "fps": {"type": "integer", "default": 25, "description": "MuseTalk is trained at 25 fps; keep 25 for musetalk_mlx"},
         },
@@ -150,7 +151,7 @@ class TwinLipsync(BaseTool):
                     looped = out_dir / f"{sid}.motion.mp4"
                     loop_info = twin_media.loop_to_duration(motion, looped, dur, fps, mode=inputs.get("loop_mode", "auto"))
                     try:
-                        backend.lipsync(looped, audio, out)
+                        backend.lipsync(looped, audio, out, **({"options": inputs["lipsync_options"]} if inputs.get("lipsync_options") else {}))
                     finally:
                         looped.unlink(missing_ok=True)
                     progress["done"][sid] = key

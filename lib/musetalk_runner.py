@@ -131,6 +131,29 @@ def mouth_mask(shape: tuple[int, int], lm: np.ndarray, box: tuple[int, int, int,
     return mask * win
 
 
+def color_match(gen_bgr: np.ndarray, src_bgr: np.ndarray, mask: np.ndarray, lm: np.ndarray, strength: float = 1.0) -> np.ndarray:
+    """Shift the regenerated skin to the portrait's own skin tone (mean and spread in LAB, measured on skin pixels inside the mask, lips excluded).
+
+    MuseTalk's decoder returns a slightly lighter, greyer skin than the portrait, which shows as a pale patch with a visible edge around the mouth."""
+    import cv2
+
+    h, w = gen_bgr.shape[:2]
+    pts = lm[:, :2] * np.array([w, h], dtype=np.float32)
+    lips = np.zeros((h, w), np.uint8)
+    cv2.fillConvexPoly(lips, cv2.convexHull(pts[[61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146]].astype(np.int32)), 255)
+    lips = cv2.dilate(lips, np.ones((int(0.06 * np.linalg.norm(pts[234] - pts[454])) | 1,) * 2, np.uint8))
+    skin = (mask > 0.15) & (lips == 0)
+    if skin.sum() < 200:
+        return gen_bgr
+    g = cv2.cvtColor(gen_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    s_ = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    mg, sg = g[skin].mean(axis=0), g[skin].std(axis=0) + 1e-3
+    ms, ss = s_[skin].mean(axis=0), s_[skin].std(axis=0) + 1e-3
+    gain = np.clip(ss / sg, 0.7, 1.3)  # never invent or flatten texture by much
+    out = (g - mg) * (1.0 + strength * (gain - 1.0)) + mg + strength * (ms - mg)
+    return cv2.cvtColor(np.clip(out, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+
 def sharpen_in_mask(frame_bgr: np.ndarray, mask: np.ndarray, amount: float, sigma: float = 1.6) -> np.ndarray:
     """Unsharp mask applied only where ``mask`` is set (the regenerated mouth is softer than the rest of the face)."""
     import cv2
@@ -172,7 +195,7 @@ def lipsync(motion_video: Path, audio: Path, out: Path, fps: int = FPS, batch_si
     ``options`` (all optional): ``open_scale`` (0.5-1.0: pull the audio features toward silence, i.e. a less wide-open mouth), ``mask`` ("oval" = whole lower
     face, the original; "mouth" = lips and chin only), ``sharpen`` (unsharp amount inside the mouth mask), ``mask_reach`` (ellipse half-width / face width).
     """
-    opts = {"open_scale": 1.0, "mask": "oval", "sharpen": 0.0, "mask_reach": 0.30, **(options or {})}
+    opts = {"open_scale": 1.0, "mask": "oval", "sharpen": 0.0, "mask_reach": 0.30, "color_match": 0.0, **(options or {})}
     import cv2
     import mlx.core as mx
 
@@ -223,7 +246,17 @@ def lipsync(motion_video: Path, audio: Path, out: Path, fps: int = FPS, batch_si
             lm = lms[j] if lms[j] is not None else last_lm
             frame = frames[j]
             m = mouth_mask((h, w), lm, boxes[j], reach=opts["mask_reach"]) if opts["mask"] == "mouth" else blend_mask((h, w), lm, boxes[j])
-            res = paste_back(frame, faces[i], boxes[j], m)
+            if opts["color_match"] > 0 and opts["mask"] == "mouth":
+                import cv2 as _cv
+
+                x1, y1, x2, y2 = boxes[j]
+                gen_full = frame.copy()
+                gen_full[y1:y2, x1:x2] = _cv.resize(faces[i], (x2 - x1, y2 - y1), interpolation=_cv.INTER_LANCZOS4)  # no 256 round trip: keep the detail
+                matched = color_match(gen_full, frame, m, lm, opts["color_match"])
+                mm_ = m[..., None]
+                res = (matched.astype(np.float32) * mm_ + frame.astype(np.float32) * (1.0 - mm_)).round().astype(np.uint8)
+            else:
+                res = paste_back(frame, faces[i], boxes[j], m)
             if opts["sharpen"] > 0:
                 res = sharpen_in_mask(res, m, opts["sharpen"])
             cv2.imwrite(str(odir / f"o_{i:06d}.png"), res)

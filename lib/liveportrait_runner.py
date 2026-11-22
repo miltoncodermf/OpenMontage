@@ -39,6 +39,7 @@ def animate(source_image: Path, driving_video: Path, out_dir: Path, *, half: boo
     ok, why = available()
     if not ok:
         raise RuntimeError(why)
+    source_image, driving_video, out_dir = Path(source_image).resolve(), Path(driving_video).resolve(), Path(out_dir).resolve()  # the worker runs in the LivePortrait folder
     out_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     cmd = [sys.executable, str(WORKER), "--lp-dir", str(lp_dir()), "--source", str(source_image), "--driving", str(driving_video),

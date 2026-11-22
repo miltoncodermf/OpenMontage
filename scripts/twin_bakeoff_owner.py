@@ -117,7 +117,7 @@ def natural_args() -> list[str]:
     model = pdir() / "derived" / "blink_templates.json"
     blink = ["--blink-model", str(model)] if model.is_file() else ["--blinks"]
     return [*blink, "--pose-smooth", "0.35", "--pose-damp", "0.6", "--max-rot-deg", "5", "--max-trans-sigma", "1.5", "--exp-smooth", "0.25",
-            "--hold-frames", str(HOLD_FRAMES)]
+            "--hold-frames", str(HOLD_FRAMES), "--lip-gain", os.environ.get("BAKEOFF_LIP_GAIN", "1.0")]
 
 
 NATURAL_GAIN = 0.6
@@ -210,7 +210,7 @@ def stage_lipsync() -> dict:
 
     motion = (pdir() / "loops" / VARIANT / "idle.mp4") if os.environ.get("BAKEOFF_ENGINE") == "hybrid" else (pdir() / "performance" / f"{VARIANT}.mp4")
     res = TwinLipsync().execute({"backend": "musetalk_mlx", "motion_source": str(motion), "output_dir": str(OUT),
-                                 "loop_mode": "auto_crossfade", "segments": [{"segment_id": "seg1", "audio": str(NARRATION)}]})
+                                 "loop_mode": "auto_crossfade", **({"lipsync_options": json.loads(os.environ["BAKEOFF_MOUTH"])} if os.environ.get("BAKEOFF_MOUTH") else {}), "segments": [{"segment_id": "seg1", "audio": str(NARRATION)}]})
     if not res.success:
         raise SystemExit(f"lipsync failed: {res.error}")
     return res.data
@@ -264,7 +264,8 @@ def _compile(layout: str):
                 "diagram_spec": spec, "focus_region": {"x": 0.1, "y": 0.38, "w": 0.8, "h": 0.28}}
     else:
         beat = {"beat_id": "b1", "visual_type": "presenter_fullscreen", "duration_hint_seconds": dur, "layout": {"preset": "presenter_fullscreen"},
-                "presenter_backdrop": backdrops.remotion_spec(pdir(), "bg_home_office")}
+                "presenter_backdrop": backdrops.remotion_spec(pdir(), "bg_home_office"),
+                **({"presenter_scale": float(os.environ["BAKEOFF_PRESENTER_SCALE"])} if os.environ.get("BAKEOFF_PRESENTER_SCALE") else {})}
     plan = {"version": "2.0", "sections": [{"section_id": "a", "script_section_id": "s1", "learning_objective": "Unified memory", "visual_beats": [beat]}]}
     compiled = ScenePlanAdapter().compile(plan, {"assets": [asset]}, [{"scene_id": "s1", "duration_s": dur, "timestamps": al.data["timestamps"]}],
                                           {"s1": dur}, canvas=CANVAS)
@@ -282,7 +283,7 @@ def stage_render(layout: str) -> dict:
         loudness.master_two_pass(NARRATION, mastered)
     ed = {**compiled["edit_decisions"], "cuts": compiled["cuts"], "captions": compiled["captions"], "canvas": compiled["canvas"],
           "audio": {"narration": {"src": str(mastered)}}, "total_duration_seconds": dur}
-    out = OUT / f"render_{layout}.mp4"
+    out = OUT / f"render_{layout}{os.environ.get('BAKEOFF_RENDER_SUFFIX', '')}.mp4"
     vc = VideoCompose()
     res = vc._remotion_render({"edit_decisions": ed, "output_path": str(out), "remotion_timeout_ms": 240_000})
     if not res.success:
