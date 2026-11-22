@@ -288,14 +288,16 @@ def stage_render(layout: str) -> dict:
 
 
 def stage_qa_render() -> dict:
-    """Face-scale check on the finished full-screen render (catches LivePortrait lean-in and any compositor zoom)."""
-    from lib.presenter_qa import check_face_scale, default_face_width_series
+    """Face-scale, brow-repetition and blink-rate checks on the finished full-screen render (the PIP face is too small for landmarks)."""
+    from lib import face_tools
+    from lib.presenter_qa import check_blink_rate, check_brow_repetition, check_face_scale
 
     res = {}
-    for layout in ("full", "pip"):
-        r = OUT / f"render_{layout}.mp4"
-        if r.exists():
-            res[layout] = check_face_scale(r, default_face_width_series())
+    r = OUT / "render_full.mp4"
+    if r.exists():
+        sig = face_tools.face_signals_from_video(r, 25.0)
+        res["full"] = {"face_scale": check_face_scale(r, lambda _v: sig["width"], fps=25.0), "brow_repetition": check_brow_repetition(sig["brow"], 25.0),
+                       "blink_rate": check_blink_rate(sig["lid"], 25.0)}
     (OUT / "qa_render.json").write_text(json.dumps(res, indent=2))
     return res
 

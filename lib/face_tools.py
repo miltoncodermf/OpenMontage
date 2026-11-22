@@ -135,3 +135,36 @@ def face_width_series_from_video(video: Path, fps: float = 5.0) -> np.ndarray:
             px = lm[:, :2] * np.array([w, h], dtype=np.float32)
             out.append(float(np.linalg.norm(px[234] - px[454])))
     return np.array(out, dtype=np.float32)
+
+
+def face_signals_from_video(video: Path, fps: float = 25.0, start: float | None = None, duration: float | None = None) -> dict[str, np.ndarray]:
+    """Per-frame face signals for the naturalness QA (NaN where no face is found):
+    ``width`` (cheek to cheek, px), ``brow`` (brow-to-eye distance / face width, bigger = brows raised), ``lid`` (eyelid opening / eye width)."""
+    import subprocess
+    import tempfile
+
+    sig: dict[str, list[float]] = {"width": [], "brow": [], "lid": []}
+    cmd_in = ["-ss", str(start)] if start is not None else []
+    cmd_t = ["-t", str(duration)] if duration is not None else []
+    with tempfile.TemporaryDirectory() as td:
+        subprocess.run(["ffmpeg", "-y", "-v", "error", *cmd_in, *cmd_t, "-i", str(video), "-vf", f"fps={fps}", str(Path(td) / "f_%05d.jpg")], check=True, timeout=1800)
+        for f in sorted(Path(td).glob("f_*.jpg")):
+            im = Image.open(f).convert("RGB")
+            lm = face_landmarks(im)
+            if lm is None:
+                for k in sig:
+                    sig[k].append(float("nan"))
+                continue
+            w, h = im.size
+            px = lm[:, :2] * np.array([w, h], dtype=np.float32)
+            fw = float(np.linalg.norm(px[234] - px[454]))
+
+            def lid(c1: int, c2: int, top: int, bot: int) -> float:
+                return float(abs(px[bot, 1] - px[top, 1]) / (np.linalg.norm(px[c1] - px[c2]) + 1e-6))
+
+            sig["width"].append(fw)
+            brow_pts = [46, 52, 53, 55, 63, 65, 66, 70, 105, 107, 276, 282, 283, 285, 293, 295, 296, 300, 334, 336]  # both eyebrows, many points: less jitter
+            eye_top = [159, 158, 160, 386, 385, 387]
+            sig["brow"].append(float((px[eye_top, 1].mean() - px[brow_pts, 1].mean()) / fw))
+            sig["lid"].append((lid(33, 133, 159, 145) + lid(362, 263, 386, 374)) / 2)
+    return {k: np.array(v, dtype=np.float32) for k, v in sig.items()}

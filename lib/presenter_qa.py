@@ -19,6 +19,9 @@ from PIL import Image
 FACE_PRESENCE_MIN = 0.98
 MAX_OFFSET_FRAMES = 2
 RAW_HASH_MAX_DISTANCE = 6  # of 256 bits
+BROW_MIRROR_MAX = 0.80  # mirror correlation of the brow series (see check_brow_repetition); real footage 0.66, ping-pong 0.87-0.92
+BROW_AUTOCORR_MAX = 0.75
+BLINKS_PER_MIN = (6.0, 30.0)  # natural range (the owner's own recording: 15/min)
 FACE_SCALE_MAX_VARIATION = 0.03  # head size may vary at most ~3% over the clip (owner feedback: head resizing)
 
 
@@ -146,6 +149,90 @@ def check_face_scale(video: Path, width_series: Callable[[Path], np.ndarray] | N
             "min_width_px": round(min(meds), 1), "max_width_px": round(max(meds), 1), "seconds": len(meds)}
 
 
+def _detrended(x, fps: float):
+    x = np.asarray(x, dtype=float)
+    idx = np.arange(len(x))
+    ok = np.isfinite(x)
+    if ok.sum() < 3:
+        return None
+    x = np.interp(idx, idx[ok], x[ok])
+    k = max(3, int(1.5 * fps))
+    ma = np.convolve(np.pad(x, (k // 2, k // 2), mode="edge"), np.ones(k) / k, mode="valid")[: len(x)]
+    d = x - ma
+    from scipy.ndimage import gaussian_filter1d
+
+    d = gaussian_filter1d(d, max(1.0, 0.15 * fps))  # landmark jitter, not expression
+    return d / (d.std() + 1e-9)
+
+
+def check_brow_repetition(brow, fps: float = 25.0, max_mirror: float = BROW_MIRROR_MAX, max_autocorr: float = BROW_AUTOCORR_MAX) -> dict[str, Any]:
+    """Brow movement must not repeat. Two statistics on the (detrended, jitter-smoothed) brow height:
+    * mirror correlation: the series before a point against its own time-reversal after it, over windows of up to 8 s each side — a ping-pong
+      loop reverses the motion, so this stays high (0.87-0.92 measured) while free movement does not (0.66 and -0.01 on the owner's real footage);
+    * autocorrelation at lags of 2-10 s — a plain repeat shows up here (real footage 0.34-0.64).
+    Heuristic, calibrated on the owner's recording and the earlier ping-pong renders; the peak values are reported."""
+    if brow is None:
+        return {"status": "not_run", "passed": None, "reason": "no face-signal provider available (install mediapipe)"}
+    x = _detrended(brow, fps)
+    n = 0 if x is None else len(x)
+    if x is None or n < int(12 * fps):
+        return {"status": "not_run", "passed": None, "reason": "fewer than 12 seconds of brow data"}
+    best_ac, ac_lag = -1.0, 0.0
+    for lag in range(int(2.0 * fps), min(int(10 * fps), int(n * 0.55))):
+        a_, b_ = x[: n - lag], x[lag:]
+        r = float(np.dot(a_, b_) / (len(a_) * a_.std() * b_.std() + 1e-9))
+        if r > best_ac:
+            best_ac, ac_lag = r, lag / fps
+    k = int(min(8.0, 0.4 * n / fps) * fps)
+    best_m, m_at = -1.0, 0.0
+    for m in range(k, n - k + 1, 5):
+        r = float(np.corrcoef(x[m - k: m], x[m: m + k][::-1])[0, 1])
+        if r > best_m:
+            best_m, m_at = r, m / fps
+    passed = best_m <= max_mirror and best_ac <= max_autocorr
+    return {"status": "run", "passed": passed, "mirror_peak": round(best_m, 3), "mirror_at_s": round(m_at, 1), "mirror_threshold": max_mirror,
+            "autocorr_peak": round(best_ac, 3), "autocorr_lag_s": round(ac_lag, 1), "autocorr_threshold": max_autocorr, "window_s": round(k / fps, 1)}
+
+
+def count_blinks(lid, fps: float = 25.0, thr: float = 0.7) -> int:
+    x = np.asarray(lid, dtype=float)
+    ok = np.isfinite(x)
+    if ok.sum() < 3:
+        return 0
+    x = np.where(ok, x, np.nanmedian(x))
+    below = x < thr * np.percentile(x, 60)
+    events, i, n = 0, 0, len(x)
+    while i < n:
+        if below[i]:
+            j = i
+            while j < n and below[j]:
+                j += 1
+            if 1 <= j - i <= max(2, int(0.4 * fps)):
+                events += 1
+            i = j
+        else:
+            i += 1
+    return events
+
+
+def check_blink_rate(lid, fps: float = 25.0, limits: tuple[float, float] = BLINKS_PER_MIN) -> dict[str, Any]:
+    """A natural presenter blinks every few seconds: eyelid-opening dips of 1-10 frames, counted per minute."""
+    if lid is None:
+        return {"status": "not_run", "passed": None, "reason": "no face-signal provider available (install mediapipe)"}
+    n = len(lid)
+    if n < int(10 * fps):
+        return {"status": "not_run", "passed": None, "reason": "fewer than 10 seconds of eyelid data"}
+    ev = count_blinks(lid, fps)
+    rate = ev * 60.0 * fps / n
+    return {"status": "run", "passed": limits[0] <= rate <= limits[1], "blinks": ev, "per_minute": round(rate, 1), "limits_per_minute": list(limits), "seconds": round(n / fps, 1)}
+
+
+def default_face_signals() -> Callable[[Path], dict[str, np.ndarray]] | None:
+    from lib import face_tools
+
+    return face_tools.face_signals_from_video if face_tools.mediapipe_available()[0] else None
+
+
 def default_face_width_series() -> Callable[[Path], np.ndarray] | None:
     from lib import face_tools
 
@@ -167,21 +254,26 @@ def default_mouth_series() -> Callable[[Path], np.ndarray] | None:
 
 def presenter_qa_report(asset: dict[str, Any], clip: Path, audio: Path, fps: float, raw_videos: Sequence[Path],
                         detector: Callable | None = None, mouth_series: Callable | None = None, use_defaults: bool = True,
-                        width_series: Callable | None = None) -> dict[str, Any]:
+                        width_series: Callable | None = None, signals: Callable | None = None) -> dict[str, Any]:
     from lib.presenter_guard import presenter_asset_problems
 
     if use_defaults:  # real MediaPipe checks unless the caller injected its own (tests) or opted out
         detector = detector or default_detector()
         mouth_series = mouth_series or default_mouth_series()
-        width_series = width_series or default_face_width_series()
+        signals = signals or (default_face_signals() if width_series is None else None)
 
+    sig = signals(clip) if signals is not None else None
+    if sig is not None and width_series is None:
+        width_series = lambda _v, _w=sig["width"]: _w  # noqa: E731  (one MediaPipe pass serves all three checks)
     problems = presenter_asset_problems(asset)
     checks = {
         "identity": {"status": "run", "passed": not problems, "problems": problems,
                      **({"standin": True} if asset.get("standin") else {})},
         "face_presence": check_face_presence(clip, detector),
         "mouth_sync": check_mouth_sync(clip, audio, fps, mouth_series),
-        "face_scale": check_face_scale(clip, width_series),
+        "face_scale": check_face_scale(clip, width_series, fps=fps if sig is not None else 5.0),
+        "brow_repetition": check_brow_repetition(sig["brow"] if sig else None, fps),
+        "blink_rate": check_blink_rate(sig["lid"] if sig else None, fps),
         "no_raw_frames": check_no_raw_frames(clip, raw_videos),
     }
     failed = [k for k, v in checks.items() if v["passed"] is False]

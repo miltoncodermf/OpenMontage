@@ -1881,7 +1881,7 @@ class TestV3PresenterQA:
         good = {"asset_id": "p", "asset_type": "presenter_video", "path": "assets/presenter/x.mp4", "identity_transform": "beautified", "profile_id": "owner"}
         rep = presenter_qa_report(good, clip, audio, 30.0, [], use_defaults=False)  # no providers -> honest not_run
         assert rep["passed"] is False and rep["verdict"] == "incomplete"
-        assert set(rep["not_run"]) == {"face_presence", "mouth_sync", "face_scale", "no_raw_frames"} and rep["failed"] == []
+        assert set(rep["not_run"]) == {"face_presence", "mouth_sync", "face_scale", "brow_repetition", "blink_rate", "no_raw_frames"} and rep["failed"] == []
         # with injected providers it can pass; a failing identity fails outright
         rep2 = presenter_qa_report(good, clip, audio, 30.0, [], detector=lambda im: True,
                                    mouth_series=lambda v: __import__("numpy").abs(__import__("numpy").sin(__import__("numpy").arange(30) / 3)))
@@ -3780,3 +3780,54 @@ class TestNaturalDrivingEdits:
         out = w.edit_template(self._tpl(), hold_frames=3, pose_smooth_s=0.1)
         body_mean_exp = np.mean([m["exp"] for m in out["motion"][3:]], axis=0)
         assert np.allclose(out["motion"][0]["exp"], body_mean_exp, atol=1e-5) and np.allclose(out["motion"][2]["exp"], body_mean_exp, atol=1e-5)
+
+
+class TestNaturalnessQA:
+    """Owner: repetitive brow movement, head resizing, not natural -> QA must catch loops and un-blinking faces."""
+
+    def test_brow_repetition_flags_a_mirrored_loop_but_not_free_motion(self):
+        import numpy as np
+
+        from lib.presenter_qa import check_brow_repetition
+
+        rng = np.random.default_rng(1)
+        from scipy.ndimage import gaussian_filter1d
+
+        free = gaussian_filter1d(rng.normal(0, 1.0, 550), 6)  # band-limited, never repeats
+        half = free[:245]
+        loop = np.concatenate([half, half[::-1], half])[:550]  # ping-pong of a 9.8 s clip
+        assert check_brow_repetition(free)["passed"] is True
+        res = check_brow_repetition(loop)
+        assert res["passed"] is False and res["mirror_peak"] > 0.8
+        assert check_brow_repetition(None)["status"] == "not_run"
+        assert check_brow_repetition(free[:200])["status"] == "not_run"
+
+    def test_blink_rate_counts_dips_and_rejects_a_face_that_never_blinks(self):
+        import numpy as np
+
+        from lib.presenter_qa import check_blink_rate
+
+        lid = np.full(550, 0.6)
+        for c in (60, 160, 270, 380, 470):  # 5 blinks in 22 s = 13.6/min
+            lid[c:c + 4] = [0.4, 0.05, 0.05, 0.3]
+        ok = check_blink_rate(lid)
+        assert ok["passed"] is True and ok["blinks"] == 5
+        assert check_blink_rate(np.full(550, 0.6))["passed"] is False
+        assert check_blink_rate(None)["status"] == "not_run"
+
+    def test_qa_report_uses_one_signal_pass_for_scale_brows_and_blinks(self, tmp_path):
+        import numpy as np
+
+        from lib.presenter_qa import presenter_qa_report
+
+        clip = _moving_clip(tmp_path / "c.mp4", seconds=1.0, size="320x180")
+        good = {"asset_id": "p", "asset_type": "presenter_video", "path": "assets/presenter/x.mp4", "identity_transform": "beautified", "profile_id": "owner"}
+        calls = []
+        n = 550
+        lid = np.full(n, 0.6)
+        for c in (60, 160, 270, 380, 470):
+            lid[c:c + 4] = [0.4, 0.05, 0.05, 0.3]
+        sig = {"width": np.full(n, 290.0), "brow": np.cumsum(np.random.default_rng(2).normal(0, 0.01, n)), "lid": lid}
+        rep = presenter_qa_report(good, clip, clip, 25.0, [], use_defaults=False, signals=lambda v: calls.append(v) or sig)
+        assert len(calls) == 1 and rep["checks"]["face_scale"]["passed"] is True
+        assert rep["checks"]["brow_repetition"]["status"] == "run" and rep["checks"]["blink_rate"]["passed"] is True
