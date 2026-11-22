@@ -23,6 +23,9 @@ export interface PresenterFullScreenProps {
   backdropColor?: string;
   /** Owner's background catalog entry (procedural spec or plate image); drawn under the alpha presenter. */
   backdrop?: PresenterBackdropSpec;
+  /** Medium-shot framing for a matted presenter: 1 = as rendered, 0.8 = the person is 20 % smaller, anchored at the bottom centre. The regenerated
+   *  mouth is softer than the rest of the face, and a smaller face hides that. */
+  presenterScale?: number;
 }
 
 export const PresenterFullScreen: React.FC<PresenterFullScreenProps> = ({
@@ -35,6 +38,7 @@ export const PresenterFullScreen: React.FC<PresenterFullScreenProps> = ({
   alpha = false,
   backdropColor = "#0F172A",
   backdrop,
+  presenterScale = 1,
 }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames, width, height } = useVideoConfig();
@@ -74,7 +78,8 @@ export const PresenterFullScreen: React.FC<PresenterFullScreenProps> = ({
           width: "100%",
           height: "100%",
           objectFit: alpha ? "contain" : "cover",
-          transform: `scale(${scale})`,
+          transform: `scale(${scale * (alpha ? presenterScale : 1)})`,
+          transformOrigin: alpha ? "50% 100%" : "50% 50%",
           willChange: "transform",
         }}
       />

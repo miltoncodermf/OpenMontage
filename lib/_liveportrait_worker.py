@@ -91,12 +91,13 @@ def _smooth(x, sigma_frames: float):
 def edit_template(tpl: dict, *, lock_eyes: bool = False, gain: float = 1.0, lock_scale: bool = False, pose_smooth_s: float = 0.0,
                   pose_damp: float = 1.0, max_rot_deg: float = 0.0, max_trans_sigma: float = 0.0, exp_smooth_s: float = 0.0,
                   blinks: bool = False, blink_seed: int = 7, blink_gap_s: tuple = (3.0, 6.5), blink_depth: tuple = (0.8, 1.0), blink_double_prob: float = 0.15,
-                  hold_frames: int = 0, fps: float = 25.0, blink_model: dict | None = None) -> dict:
+                  hold_frames: int = 0, fps: float = 25.0, blink_model: dict | None = None, lip_gain: float = 1.0) -> dict:
     """Edit the driving template in place before animation (pure function so it can be tested without LivePortrait).
 
     lock_eyes: every frame's eye keypoints become the open-eye median (no gaze wander, no real blinks);
     blinks: then add scripted blinks at natural, jittered intervals (about 12-14 a minute): eased close in ~100 ms and a slower ~180 ms re-open, depth
       80-100 % of the driving clip's most closed eye frame, an occasional double blink;
+    lip_gain: scale LivePortrait's own mouth keypoint motion around the clip mean (MuseTalk repaints the mouth);
     lock_scale: head scale of every frame = first frame's (no growing or shrinking);
     pose_smooth_s / pose_damp / max_rot_deg / max_trans_sigma: low-pass the head rotation and translation, damp their amplitude around the
       clip mean and cap the drift (rotation in degrees, translation in standard deviations);
@@ -112,6 +113,12 @@ def edit_template(tpl: dict, *, lock_eyes: bool = False, gain: float = 1.0, lock
     h = hold_frames
     body = slice(h, n)
     # -- brow/cheek expression: smooth, then scale around the mean --------------------------------------------------
+    if lip_gain != 1.0:  # MuseTalk draws the mouth: make LivePortrait's own lip/jaw motion smaller (0 = a still mouth) so the two do not fight
+        lx = np.stack([m["exp"][0, LIP_IDX, :] for m in motion])
+        lmean = lx[body].mean(axis=0, keepdims=True)
+        lnew = lmean + lip_gain * (lx - lmean)
+        for i, m in enumerate(motion):
+            m["exp"][0, LIP_IDX, :] = lnew[i]
     if exp_smooth_s > 0 or gain != 1.0:
         ex = np.stack([m["exp"][0, other, :] for m in motion])  # (n, k, 3)
         ex_s = _smooth(ex, exp_smooth_s * fps)
@@ -262,6 +269,7 @@ def main() -> None:
     ap.add_argument("--lock-eyes", action="store_true", help="drop blinks and eye/gaze motion from the driving clip (eyes stay as in the portrait)")
     ap.add_argument("--blinks", action="store_true", help="with --lock-eyes: add scripted natural blinks")
     ap.add_argument("--blink-model", default=None, help="json with the owner's real blink curves: blinks are rendered by eye retargeting along them")
+    ap.add_argument("--lip-gain", type=float, default=1.0, help="scale LivePortrait's lip/jaw keypoint motion around the clip mean (0 = still mouth)")
     ap.add_argument("--pose-smooth", type=float, default=0.0, help="head pose low-pass sigma in seconds")
     ap.add_argument("--pose-damp", type=float, default=1.0, help="head pose amplitude factor around the clip mean")
     ap.add_argument("--max-rot-deg", type=float, default=0.0)
@@ -291,8 +299,8 @@ def main() -> None:
 
         blink_model = bm.load(Path(a.blink_model))
     edits = {"blink_model": blink_model, "blinks": a.blinks, "pose_smooth_s": a.pose_smooth, "pose_damp": a.pose_damp, "max_rot_deg": a.max_rot_deg,
-             "max_trans_sigma": a.max_trans_sigma, "exp_smooth_s": a.exp_smooth, "hold_frames": a.hold_frames}
-    if a.lock_eyes or a.lock_scale or a.expression_gain != 1.0 or a.pose_smooth or a.pose_damp != 1.0 or a.max_rot_deg or a.exp_smooth or a.hold_frames or a.blink_model:
+             "max_trans_sigma": a.max_trans_sigma, "exp_smooth_s": a.exp_smooth, "hold_frames": a.hold_frames, "lip_gain": a.lip_gain}
+    if a.lock_eyes or a.lock_scale or a.expression_gain != 1.0 or a.pose_smooth or a.pose_damp != 1.0 or a.max_rot_deg or a.exp_smooth or a.hold_frames or a.blink_model or a.lip_gain != 1.0:
         _install_template_edits(LivePortraitPipeline, lock_eyes=a.lock_eyes, gain=a.expression_gain, lock_scale=a.lock_scale, **edits)
     pipe = LivePortraitPipeline(inference_cfg=inf, crop_cfg=crop)
     if blink_model is not None:

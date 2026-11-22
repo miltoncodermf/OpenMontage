@@ -3210,6 +3210,64 @@ class TestDefaultsAndRemotionBackdrop:
                                        {"assets": [REAL_PRESENTER, REAL_MATTE]}, [], {"s1": 5.0, "s2": 6.0})
 
 
+class TestMouthWork:
+    """Owner: the regenerated mouth and the diagonal crease around it look unnatural in full screen."""
+
+    def test_presenter_scale_is_passed_for_alpha_presenters_and_validated(self):
+        from tools.video.scene_plan_adapter import ScenePlanAdapter
+
+        plan = {**V3_PLAN, "presenter_scale": 0.8}
+        alpha = ScenePlanAdapter().compile(plan, {"assets": [REAL_PRESENTER, REAL_MATTE]}, [], {"s1": 5.0, "s2": 6.0})
+        assert all(c["presenterScale"] == 0.8 for c in alpha["cuts"] if c.get("presenterVideo"))
+        plain = ScenePlanAdapter().compile(plan, {"assets": [REAL_PRESENTER]}, [], {"s1": 5.0, "s2": 6.0})
+        assert not any("presenterScale" in c for c in plain["cuts"])
+        with pytest.raises(ValueError, match="presenter_scale"):
+            ScenePlanAdapter().compile({**V3_PLAN, "presenter_scale": 1.4}, {"assets": [REAL_PRESENTER, REAL_MATTE]}, [], {"s1": 5.0, "s2": 6.0})
+
+    def test_mouth_mask_stays_off_the_cheeks_and_inside_the_crop_box(self):
+        import numpy as np
+
+        from lib import musetalk_runner as mr
+
+        h, w = 400, 600
+        lm = np.zeros((478, 3), dtype="float32")
+        pts = {234: (200, 160), 454: (400, 160), 61: (260, 260), 291: (340, 260), 152: (300, 330), 2: (300, 225)}
+        for i, (x, y) in pts.items():
+            lm[i] = (x / w, y / h, 0)
+        box = (190, 150, 410, 340)
+        m = mr.mouth_mask((h, w), lm, box)
+        assert m[260, 300] > 0.9 and m[300, 300] > 0.5  # lips and chin are replaced
+        assert m[260, 215] < 0.1 and m[260, 390] < 0.1  # cheeks beside the corners are not
+        assert m[100, 300] == 0.0 and m[:150].max() == 0.0 and m[341:].max() < 0.02 and m[:, :190].max() < 0.02  # nothing outside the box, nothing above the nose
+        out = mr.sharpen_in_mask(np.full((h, w, 3), 100, dtype="uint8"), m, 0.8)
+        assert out.shape == (h, w, 3) and (out == 100).all()  # a flat image has nothing to sharpen
+
+    def test_lip_gain_calms_livenportrait_mouth_motion(self):
+        import numpy as np
+
+        from lib import _liveportrait_worker as w
+
+        rng = np.random.default_rng(3)
+        n = 60
+        tpl = {"motion": [{"exp": rng.normal(0, 0.1, (1, 21, 3)).astype("float32"), "scale": np.array([[0.5]], "float32")} for _ in range(n)],
+               "c_eyes_lst": [np.array([[0.5, 0.5]])] * n}
+        before = np.stack([m["exp"][0, w.LIP_IDX, :] for m in tpl["motion"]]).std(axis=0).mean()
+        out = w.edit_template(tpl, lip_gain=0.0)
+        after = np.stack([m["exp"][0, w.LIP_IDX, :] for m in out["motion"]]).std(axis=0).mean()
+        assert before > 0.05 and after < 1e-6
+
+    def test_mouth_metrics_summary_fields(self):
+        import numpy as np
+
+        from lib import mouth_metrics as mm
+
+        n = 50
+        sig = {"open_h": np.linspace(0, 0.08, n), "width": np.full(n, 0.35), "aspect": np.linspace(0, 0.2, n), "teeth": np.linspace(0, 0.3, n),
+               "crease": np.full(n, 1.5), "sharp_ratio": np.full(n, 0.7)}
+        s = mm.summarize(sig)
+        assert 0.03 < s["open_h_mean_when_open"] < 0.08 and s["crease_mean"] == 1.5 and 0 < s["teeth_frames_pct"] < 100
+
+
 class TestChatterboxTruncationFix:
     def test_sentences_split_and_truncated_tail_is_detected(self):
         from lib import voice_lab as vl

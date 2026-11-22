@@ -213,6 +213,11 @@ class ScenePlanAdapter:
                         if bad_bd:
                             raise ValueError(f"beat '{beat_id}': {'; '.join(bad_bd)}")
                         cut["presenterBackdrop"] = bd
+                    ps = beat.get("presenter_scale") or plan_v2.get("presenter_scale")
+                    if ps is not None and presenter_is_alpha:
+                        if not (isinstance(ps, (int, float)) and 0.5 <= float(ps) <= 1.0):
+                            raise ValueError(f"beat '{beat_id}': presenter_scale must be a number between 0.5 and 1.0")
+                        cut["presenterScale"] = float(ps)
                     if pip_requested:
                         cut["presenterPip"] = True
                         cut["presenterLabel"] = "Presenter"

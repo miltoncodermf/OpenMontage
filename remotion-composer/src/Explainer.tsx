@@ -281,6 +281,7 @@ interface Cut {
   presenterAlpha?: boolean;
   /** Background catalog entry for the presenter (see lib/backdrops.py): procedural spec or plate image. */
   presenterBackdrop?: PresenterBackdropSpec;
+  presenterScale?: number;
   /** Corner chosen by the adapter so the PIP never covers focusRegion. */
   presenterPipPosition?: "bottom-right" | "bottom-left" | "top-right" | "top-left";
   /** Normalized focus region {x,y,w,h} of what matters in this beat (spec §5.9). */
@@ -646,6 +647,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
           textColor={textColor}
           alpha={cut.presenterAlpha}
           backdrop={cut.presenterBackdrop}
+          presenterScale={cut.presenterScale}
           backdropColor={theme.backgroundColor || "#0F172A"}
         />
       );

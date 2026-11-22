@@ -103,6 +103,46 @@ def blend_mask(shape: tuple[int, int], lm: np.ndarray, box: tuple[int, int, int,
     return mask.astype(np.float32) / 255.0
 
 
+def mouth_mask(shape: tuple[int, int], lm: np.ndarray, box: tuple[int, int, int, int], reach: float = 0.30, feather: float = 0.045) -> np.ndarray:
+    """Float mask limited to the lips and chin (an ellipse around the mouth and jaw tip), feathered, nothing above the nose base or on the cheeks.
+
+    The default mask is the whole lower face oval, so MuseTalk's slightly different skin tone/texture/shading shows up as a seam and a diagonal dip
+    along the cheek from each mouth corner. This one only lets the generated pixels replace the mouth and the chin that moves with it."""
+    import cv2
+
+    h, w = shape
+    pts = lm[:, :2] * np.array([w, h], dtype=np.float32)
+    fw = float(np.linalg.norm(pts[234] - pts[454]))
+    cx = float(pts[[61, 291], 0].mean())
+    top = float(pts[[61, 291], 1].mean())
+    chin = float(pts[CHIN, 1])
+    cy = (top + chin) / 2
+    mask = np.zeros((h, w), np.uint8)
+    cv2.ellipse(mask, (int(cx), int(cy)), (int(reach * fw), int(max(8, (chin - top) / 2 + 0.07 * fw))), 0, 0, 360, 255, -1)
+    mask[: int(pts[2][1] + 0.02 * fw), :] = 0  # nothing above the nose base
+    sigma = max(2.0, feather * fw)
+    mask = cv2.GaussianBlur(mask, (0, 0), sigma).astype(np.float32) / 255.0
+    # the generated face only exists inside the crop box: fade to zero before its borders so there is no seam along them
+    x1, y1, x2, y2 = box
+    fade = max(6, int(0.04 * fw))
+    win = np.zeros((h, w), np.float32)
+    win[y1:y2, x1:x2] = 1.0
+    win = cv2.GaussianBlur(cv2.erode(win, np.ones((2 * fade + 1, 2 * fade + 1), np.uint8)), (0, 0), fade / 2.0)
+    return mask * win
+
+
+def sharpen_in_mask(frame_bgr: np.ndarray, mask: np.ndarray, amount: float, sigma: float = 1.6) -> np.ndarray:
+    """Unsharp mask applied only where ``mask`` is set (the regenerated mouth is softer than the rest of the face)."""
+    import cv2
+
+    if amount <= 0:
+        return frame_bgr
+    f = frame_bgr.astype(np.float32)
+    blur = cv2.GaussianBlur(f, (0, 0), sigma)
+    out = f + amount * (f - blur) * mask[..., None]
+    return np.clip(out, 0, 255).round().astype(np.uint8)
+
+
 def paste_back(frame_bgr: np.ndarray, face_bgr256: np.ndarray, box: tuple[int, int, int, int], mask: np.ndarray) -> np.ndarray:
     import cv2
 
@@ -126,8 +166,13 @@ def _pipeline():
     return _pipe_cache[key]
 
 
-def lipsync(motion_video: Path, audio: Path, out: Path, fps: int = FPS, batch_size: int = 8) -> dict[str, Any]:
-    """Lip-sync ``motion_video`` (already looped to the audio length) to ``audio`` → ``out`` (mp4 with audio)."""
+def lipsync(motion_video: Path, audio: Path, out: Path, fps: int = FPS, batch_size: int = 8, options: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Lip-sync ``motion_video`` (already looped to the audio length) to ``audio`` → ``out`` (mp4 with audio).
+
+    ``options`` (all optional): ``open_scale`` (0.5-1.0: pull the audio features toward silence, i.e. a less wide-open mouth), ``mask`` ("oval" = whole lower
+    face, the original; "mouth" = lips and chin only), ``sharpen`` (unsharp amount inside the mouth mask), ``mask_reach`` (ellipse half-width / face width).
+    """
+    opts = {"open_scale": 1.0, "mask": "oval", "sharpen": 0.0, "mask_reach": 0.30, **(options or {})}
     import cv2
     import mlx.core as mx
 
@@ -149,6 +194,14 @@ def lipsync(motion_video: Path, audio: Path, out: Path, fps: int = FPS, batch_si
         det_ratio = sum(lm is not None for lm in lms) / len(lms)
 
         chunks = pipe.encode_audio_from_wav(str(audio), fps=fps)
+        if opts["open_scale"] < 1.0:  # shrink the mouth movement: audio features -> silence features
+            sil = os.path.join(td, "silence.wav")
+            import soundfile as sf
+
+            sf.write(sil, np.zeros(16000 * 2, dtype="float32"), 16000)
+            sil_chunks = pipe.encode_audio_from_wav(sil, fps=fps)
+            sil_mean = mx.mean(sil_chunks, axis=0, keepdims=True)
+            chunks = sil_mean + opts["open_scale"] * (chunks - sil_mean)
         n = int(chunks.shape[0])
         latents, crops = [], []
         for f, b in zip(frames, boxes):
@@ -169,10 +222,13 @@ def lipsync(motion_video: Path, audio: Path, out: Path, fps: int = FPS, batch_si
             j = j if j < len(frames) else 2 * len(frames) - 1 - j
             lm = lms[j] if lms[j] is not None else last_lm
             frame = frames[j]
-            res = paste_back(frame, faces[i], boxes[j], blend_mask((h, w), lm, boxes[j]))
+            m = mouth_mask((h, w), lm, boxes[j], reach=opts["mask_reach"]) if opts["mask"] == "mouth" else blend_mask((h, w), lm, boxes[j])
+            res = paste_back(frame, faces[i], boxes[j], m)
+            if opts["sharpen"] > 0:
+                res = sharpen_in_mask(res, m, opts["sharpen"])
             cv2.imwrite(str(odir / f"o_{i:06d}.png"), res)
         out.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["ffmpeg", "-y", "-v", "error", "-framerate", str(fps), "-i", str(odir / "o_%06d.png"), "-i", str(audio),
                         "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest", str(out)],
                        check=True, timeout=1800)
-    return {"frames": n, "fps": fps, "size": [w, h], "face_detected_ratio": round(det_ratio, 4), "seconds": round(time.time() - t0, 1)}
+    return {"options": opts, "frames": n, "fps": fps, "size": [w, h], "face_detected_ratio": round(det_ratio, 4), "seconds": round(time.time() - t0, 1)}
