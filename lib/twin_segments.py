@@ -84,6 +84,42 @@ class RunState:
         self.save()
 
 
+# ---------------------------------------------------------------------------------------------------------------- manifest from a scene plan
+
+
+def manifest_from_scene_plan(scene_plan: dict[str, Any], script_text: dict[str, str], run_id: str, profile: str, motion_pool: list[str], **extra: Any) -> dict[str, Any]:
+    """One presenter segment per script section that contains a presenter beat (the presenter speaks the whole section; a PIP beat overlays it).
+    ``script_text`` maps script_section_id -> narration text. ``beat_ids`` lists the presenter beats the segment feeds, so a QA fallback converts exactly those."""
+    from lib.presenter_fallback import PRESENTER_BEATS
+
+    segments = []
+    for sec in scene_plan.get("sections", []):
+        sid = sec.get("script_section_id") or sec["section_id"]
+        beats = [b["beat_id"] for b in sec.get("visual_beats", []) if b.get("visual_type") in PRESENTER_BEATS or (b.get("layout") or {}).get("presenter_pip")]
+        if not beats:
+            continue
+        if sid not in script_text:
+            raise KeyError(f"no narration text for script section {sid!r}")
+        segments.append({"segment_id": sid, "beat_id": beats[0], "beat_ids": beats, "title": sec.get("learning_objective", sid), "text": script_text[sid]})
+    return {"run_id": run_id, "profile": profile, "motion_pool": motion_pool, "segments": segments, **extra}
+
+
+def fallback_scene_plan(scene_plan: dict[str, Any], manifest: dict[str, Any], run_report: dict[str, Any]) -> dict[str, Any]:
+    """The scene plan with every beat of a QA-failed segment converted to a visual beat (no presenter), the rest untouched. Nothing failed -> unchanged."""
+    from lib.presenter_fallback import replan_without_presenter
+
+    failed = [sid for sid, st in run_report.get("segments", {}).items() if st == "fallback"]
+    if not failed:
+        return scene_plan
+    beats: set[str] = set()
+    reasons = []
+    for seg in manifest["segments"]:
+        if seg["segment_id"] in failed:
+            beats.update(seg.get("beat_ids") or [seg["beat_id"]])
+            reasons.append(f"{seg['segment_id']}: {run_report['no_presenter_fallbacks'].get(seg['beat_id'], 'QA failed')}")
+    return replan_without_presenter(scene_plan, "presenter QA failed for " + "; ".join(reasons), only_beat_ids=beats)
+
+
 # ---------------------------------------------------------------------------------------------------------------- motion planning
 
 

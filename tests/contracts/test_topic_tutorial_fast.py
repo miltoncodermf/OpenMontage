@@ -4146,3 +4146,22 @@ class TestTextureRestore:
         res[290:315, 270:330] = (90, 90, 190)   # reddish lower lip of the regenerated mouth (BGR), well inside the mask
         out = mr.texture_restore(res, src, mask, lm, amount=1.0)
         assert np.abs(out[296:310, 280:320].astype(int) - res[296:310, 280:320].astype(int)).mean() < 1.0
+
+
+class TestTutorialSegmentManifest:
+    def test_manifest_from_scene_plan_and_fallback(self):
+        from lib import twin_segments as ts
+
+        plan = {"version": "2.0", "sections": [
+            {"section_id": "a", "script_section_id": "s1", "learning_objective": "Intro", "visual_beats": [{"beat_id": "b1", "visual_type": "presenter_fullscreen", "layout": {"preset": "presenter_fullscreen"}}]},
+            {"section_id": "b", "script_section_id": "s2", "learning_objective": "Diagram", "visual_beats": [{"beat_id": "b2", "visual_type": "diagram", "layout": {"preset": "diagram"}}]},
+            {"section_id": "c", "script_section_id": "s3", "learning_objective": "Demo", "visual_beats": [{"beat_id": "b3", "visual_type": "diagram", "layout": {"preset": "diagram", "presenter_pip": True}}]}]}
+        man = ts.manifest_from_scene_plan(plan, {"s1": "one", "s3": "three"}, "r", "ming", ["performance/x.mp4"])
+        assert [s["segment_id"] for s in man["segments"]] == ["s1", "s3"] and man["segments"][1]["beat_ids"] == ["b3"]
+        report = {"segments": {"s1": "done", "s3": "fallback"}, "no_presenter_fallbacks": {"b3": "presenter QA failed: brow_repetition failed"}}
+        out = ts.fallback_scene_plan(plan, man, report)
+        assert out["sections"][2]["visual_beats"][0]["layout"].get("presenter_pip") is None and out["sections"][0]["visual_beats"][0]["visual_type"] == "presenter_fullscreen"
+        assert ts.fallback_scene_plan(plan, man, {"segments": {"s1": "done", "s3": "done"}}) is plan
+        import pytest
+        with pytest.raises(KeyError):
+            ts.manifest_from_scene_plan(plan, {"s1": "one"}, "r", "ming", [])
