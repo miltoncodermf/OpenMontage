@@ -3998,3 +3998,19 @@ class TestCreaseStability:
         pulsing = 1.5 + 0.35 * np.sin(2 * np.pi * 4.0 * t)  # syllable-rate pulsing
         assert mm.flicker(pulsing)["flicker"] > 5 * mm.flicker(steady)["flicker"]
         assert mm.flicker(pulsing)["pulse"] > 5 * mm.flicker(steady)["pulse"]
+
+
+class TestOwnerMouthDefault:
+    """Owner picked variant C2 as the local mouth default: big mouth, still LivePortrait lips, lips-and-chin paste mask."""
+
+    def test_natural_bakeoff_defaults_to_c2(self, monkeypatch):
+        import importlib.util
+
+        monkeypatch.delenv("BAKEOFF_LIP_GAIN", raising=False)
+        spec = importlib.util.spec_from_file_location("twin_bakeoff_owner_t", Path(__file__).resolve().parents[2] / "scripts" / "twin_bakeoff_owner.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.NATURAL_MOUTH == {"mask": "lips", "lip_dilate": 0.05, "chin_half": 0.22, "color_match": 1.0}
+        assert "open_scale" not in mod.NATURAL_MOUTH  # MuseTalk openness stays at its default 1.0 (the big mouth the owner likes)
+        args = mod.natural_args()
+        assert args[args.index("--lip-gain") + 1] == "0.0"

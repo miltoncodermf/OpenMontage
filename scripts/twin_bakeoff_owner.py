@@ -111,13 +111,19 @@ EXPRESSION_GAIN = 1.6
 
 NATURAL = os.environ.get("BAKEOFF_NATURAL") == "1"  # long continuous driving window, calmer expression, smoothed head, natural blinks
 NATURAL_WINDOW = (36.0, 24.0)  # 33-65 s of the performance has no hands in frame
+# Owner's pick (variant C2): big MuseTalk mouth (openness 1.0, kept), LivePortrait lip motion held still so it cannot fight the regenerated mouth,
+# and a lips-and-chin-only paste mask so the folds beside the mouth come from the stable portrait. Crease flicker 0.076 -> 0.029, opening 0.052 -> 0.052.
+NATURAL_LIP_GAIN = "0.0"
+NATURAL_MOUTH = {"mask": "lips", "lip_dilate": 0.05, "chin_half": 0.22, "color_match": 1.0}
+
+
 def natural_args() -> list[str]:
     """LivePortrait worker flags for the natural driving: blinks follow the owner's own recording (derived/blink_templates.json, made by
     lib.blink_model.extract from the lid signal of raw/working/performance.sdr.mp4), else scripted blinks."""
     model = pdir() / "derived" / "blink_templates.json"
     blink = ["--blink-model", str(model)] if model.is_file() else ["--blinks"]
     return [*blink, "--pose-smooth", "0.35", "--pose-damp", "0.6", "--max-rot-deg", "5", "--max-trans-sigma", "1.5", "--exp-smooth", "0.25",
-            "--hold-frames", str(HOLD_FRAMES), "--lip-gain", os.environ.get("BAKEOFF_LIP_GAIN", "1.0")]
+            "--hold-frames", str(HOLD_FRAMES), "--lip-gain", os.environ.get("BAKEOFF_LIP_GAIN", NATURAL_LIP_GAIN)]
 
 
 NATURAL_GAIN = 0.6
@@ -210,7 +216,7 @@ def stage_lipsync() -> dict:
 
     motion = (pdir() / "loops" / VARIANT / "idle.mp4") if os.environ.get("BAKEOFF_ENGINE") == "hybrid" else (pdir() / "performance" / f"{VARIANT}.mp4")
     res = TwinLipsync().execute({"backend": "musetalk_mlx", "motion_source": str(motion), "output_dir": str(OUT),
-                                 "loop_mode": "auto_crossfade", **({"lipsync_options": json.loads(os.environ["BAKEOFF_MOUTH"])} if os.environ.get("BAKEOFF_MOUTH") else {}), "segments": [{"segment_id": "seg1", "audio": str(NARRATION)}]})
+                                 "loop_mode": "auto_crossfade", **({"lipsync_options": json.loads(os.environ["BAKEOFF_MOUTH"]) if os.environ.get("BAKEOFF_MOUTH") else NATURAL_MOUTH} if (NATURAL or os.environ.get("BAKEOFF_MOUTH")) else {}), "segments": [{"segment_id": "seg1", "audio": str(NARRATION)}]})
     if not res.success:
         raise SystemExit(f"lipsync failed: {res.error}")
     return res.data
