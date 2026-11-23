@@ -27,7 +27,7 @@ CHUNK_S = 6.0  # motion pieces from the pool are about this long
 OVERLAP_S = 0.7  # cross-dissolve between pieces
 QA_VERSION = "qa-v2"  # bump when gates change so cached verdicts are recomputed
 # Owner's pick (variant C2): see scripts/twin_bakeoff_owner.NATURAL_MOUTH.
-DEFAULT_MOUTH = {"mask": "lips", "lip_dilate": 0.05, "chin_half": 0.22, "color_match": 1.0}
+DEFAULT_MOUTH = {"mask": "lips", "lip_dilate": 0.05, "chin_half": 0.22, "color_match": 1.0, "texture": 1.0}  # C2 + the portrait's stubble/pore texture restored on skin
 ALLOWED_NOT_RUN = {"mouth_sync"}  # inconclusive by design for generated mouths (needs an ear); everything else must actually run
 
 

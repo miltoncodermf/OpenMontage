@@ -114,7 +114,7 @@ NATURAL_WINDOW = (36.0, 24.0)  # 33-65 s of the performance has no hands in fram
 # Owner's pick (variant C2): big MuseTalk mouth (openness 1.0, kept), LivePortrait lip motion held still so it cannot fight the regenerated mouth,
 # and a lips-and-chin-only paste mask so the folds beside the mouth come from the stable portrait. Crease flicker 0.076 -> 0.029, opening 0.052 -> 0.052.
 NATURAL_LIP_GAIN = "0.0"
-NATURAL_MOUTH = {"mask": "lips", "lip_dilate": 0.05, "chin_half": 0.22, "color_match": 1.0}
+NATURAL_MOUTH = {"mask": "lips", "lip_dilate": 0.05, "chin_half": 0.22, "color_match": 1.0, "texture": 1.0}  # texture: stubble/pore detail restored (matte-patch fix); "texture": 0 is plain C2
 
 
 def natural_args() -> list[str]:

@@ -199,32 +199,24 @@ def texture_restore(res_bgr: np.ndarray, src_bgr: np.ndarray, mask: np.ndarray, 
 
     MuseTalk decodes a 256 px face, so the pasted skin is smoother than the 1000+ px portrait around it: the stubble shadow above the lip and the
     chin read as a pale, matte patch. Inside the paste mask, on skin-coloured pixels only (so lips, teeth and the mouth opening are never touched), the
-    pasted frame's high-frequency band is blended toward the source frame's: ``res += amount * gate * (hp(src) - hp(res))``."""
+    source frame's high-frequency band is added back in proportion to the paste weight: ``res += amount * gate * mask * hp(src)``."""
     import cv2
 
     if amount <= 0:
         return res_bgr
-    h, w = res_bgr.shape[:2]
-    pts = lm[:, :2] * np.array([w, h], dtype=np.float32)
-    fw = float(np.linalg.norm(pts[234] - pts[454]))
     lab = cv2.cvtColor(res_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-    lips = np.zeros((h, w), np.uint8)
-    cv2.fillConvexPoly(lips, cv2.convexHull(pts[[61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146]].astype(np.int32)), 255)
-    ref = (mask > 0.15) & (lips == 0)
-    if ref.sum() < 200:
-        return res_bgr
-    # skin statistics come from the cheek-side ring just outside the lips, where nothing but skin lives
-    ring = cv2.dilate(lips, np.ones((int(0.12 * fw) | 1,) * 2, np.uint8)) - cv2.dilate(lips, np.ones((int(0.05 * fw) | 1,) * 2, np.uint8))
-    sel = (ring > 0) & ref
-    sel = sel if sel.sum() >= 200 else ref
-    mu, sd = lab[sel].mean(axis=0), lab[sel].std(axis=0) + 2.0
-    dist = np.sqrt((((lab - mu) / (2.5 * sd)) ** 2).sum(axis=2))
-    gate = cv2.GaussianBlur(np.clip(1.5 - dist, 0.0, 1.0), (0, 0), 1.5)
-    f_res, f_src = res_bgr.astype(np.float32), src_bgr.astype(np.float32)
-    hp_res = f_res - cv2.GaussianBlur(f_res, (0, 0), sigma)
+    # Only skin gets texture: the gate fades out red lips (a high), teeth (bright, nearly colourless) and the dark mouth opening. The stubble band is
+    # greyer and darker than cheek skin, so the gate is a colour-class test, not a similarity-to-the-cheek test.
+    L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
+    not_lip = np.clip((158.0 - a) / 8.0, 0.0, 1.0)
+    not_teeth = 1.0 - np.clip((L - 185.0) / 15.0, 0.0, 1.0) * np.clip((22.0 - np.hypot(a - 128.0, b - 128.0)) / 8.0, 0.0, 1.0)
+    not_dark = np.clip((L - 70.0) / 25.0, 0.0, 1.0)
+    gate = cv2.GaussianBlur(not_lip * not_teeth * not_dark, (0, 0), 1.2)
+    f_src = src_bgr.astype(np.float32)
     hp_src = f_src - cv2.GaussianBlur(f_src, (0, 0), sigma)
+    # res = m*gen + (1-m)*src already carries (1-m) of the source grain; adding m*hp(src) restores the full amount and keeps the generated detail
     wgt = (amount * gate * mask)[..., None]
-    return np.clip(f_res + wgt * (hp_src - hp_res), 0, 255).round().astype(np.uint8)
+    return np.clip(res_bgr.astype(np.float32) + wgt * hp_src, 0, 255).round().astype(np.uint8)
 
 
 def paste_back(frame_bgr: np.ndarray, face_bgr256: np.ndarray, box: tuple[int, int, int, int], mask: np.ndarray) -> np.ndarray:
