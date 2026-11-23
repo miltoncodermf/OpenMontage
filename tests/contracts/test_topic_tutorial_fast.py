@@ -3263,7 +3263,7 @@ class TestMouthWork:
 
         n = 50
         sig = {"open_h": np.linspace(0, 0.08, n), "width": np.full(n, 0.35), "aspect": np.linspace(0, 0.2, n), "teeth": np.linspace(0, 0.3, n),
-               "crease": np.full(n, 1.5), "sharp_ratio": np.full(n, 0.7)}
+               "crease": np.full(n, 1.5), "crease_l": np.full(n, 1.5), "crease_r": np.full(n, 1.5), "sharp_ratio": np.full(n, 0.7)}
         s = mm.summarize(sig)
         assert 0.03 < s["open_h_mean_when_open"] < 0.08 and s["crease_mean"] == 1.5 and 0 < s["teeth_frames_pct"] < 100
 
@@ -3967,3 +3967,34 @@ class TestBlinksFromTheOwnersRecording:
         open_ = w.apply_blink_delta(Wrapper(), kp, kp.clone(), 1.0, lmk, ratio_fn=ratio)
         shut = w.apply_blink_delta(Wrapper(), kp, kp.clone(), 0.05, lmk, ratio_fn=ratio)
         assert float(open_.abs().max()) == 0.0 and float(shut[0, 11, 1]) > 0.9
+
+
+class TestCreaseStability:
+    def test_lips_mask_leaves_the_cheeks_and_corners_alone(self):
+        import numpy as np
+
+        from lib import musetalk_runner as mr
+
+        h, w = 400, 600
+        lm = np.zeros((478, 3), dtype="float32")
+        pts = {234: (200, 160), 454: (400, 160), 61: (260, 260), 291: (340, 260), 152: (330, 335), 2: (300, 225), 0: (300, 250), 17: (300, 275), 37: (285, 252),
+               267: (315, 252), 39: (272, 255), 269: (328, 255), 185: (270, 256), 409: (330, 256), 40: (278, 253), 270: (322, 253), 375: (325, 270), 321: (315, 273),
+               405: (308, 274), 314: (302, 275), 84: (298, 275), 181: (290, 274), 91: (275, 270), 146: (268, 266)}
+        for i, (x, y) in pts.items():
+            lm[i] = (x / w, y / h, 0)
+        box = (190, 150, 410, 345)
+        m = mr.lips_chin_mask((h, w), lm, box, dilate=0.03, chin_half=0.18)
+        assert m[262, 300] > 0.9 and m[300, 300] > 0.5  # lips and chin are replaced
+        assert m[262, 232] < 0.05 and m[262, 372] < 0.05  # beside the corners: untouched (that is where the fold lives)
+        assert m[225, 300] < 0.05  # nothing at the nose base
+
+    def test_flicker_separates_a_pulsing_crease_from_a_steady_one(self):
+        import numpy as np
+
+        from lib import mouth_metrics as mm
+
+        t = np.arange(250) / 25
+        steady = 1.5 + 0.02 * np.sin(2 * np.pi * 0.1 * t)
+        pulsing = 1.5 + 0.35 * np.sin(2 * np.pi * 4.0 * t)  # syllable-rate pulsing
+        assert mm.flicker(pulsing)["flicker"] > 5 * mm.flicker(steady)["flicker"]
+        assert mm.flicker(pulsing)["pulse"] > 5 * mm.flicker(steady)["pulse"]

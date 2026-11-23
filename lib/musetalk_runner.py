@@ -154,6 +154,34 @@ def color_match(gen_bgr: np.ndarray, src_bgr: np.ndarray, mask: np.ndarray, lm: 
     return cv2.cvtColor(np.clip(out, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
 
 
+def lips_chin_mask(shape: tuple[int, int], lm: np.ndarray, box: tuple[int, int, int, int], dilate: float = 0.05, chin_half: float = 0.22,
+                   feather: float = 0.03) -> np.ndarray:
+    """Tightest useful mask: the lips (outer lip outline grown by ``dilate`` x face width) plus an ellipse on the chin/lower lip area that moves with
+    the jaw. Everything beside the mouth corners (nasolabial fold, cheeks) stays the stable, warped-portrait pixels, so the crease cannot pulse
+    with the generated mouth. Fades to zero before the crop-box border."""
+    import cv2
+
+    h, w = shape
+    pts = lm[:, :2] * np.array([w, h], dtype=np.float32)
+    fw = float(np.linalg.norm(pts[234] - pts[454]))
+    outer = pts[[61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146]].astype(np.int32)
+    mask = np.zeros((h, w), np.uint8)
+    cv2.fillConvexPoly(mask, cv2.convexHull(outer), 255)
+    k = max(3, int(2 * dilate * fw)) | 1
+    mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    cx, lip_bottom, chin = float(pts[[61, 291], 0].mean()), float(pts[17, 1]), float(pts[CHIN, 1])
+    cy = (lip_bottom + chin) / 2
+    cv2.ellipse(mask, (int(cx), int(cy)), (int(chin_half * fw), int(max(6, (chin - lip_bottom) / 2 + 0.03 * fw))), 0, 0, 360, 255, -1)
+    mask[: int(pts[2][1] + 0.02 * fw), :] = 0
+    mask = cv2.GaussianBlur(mask, (0, 0), max(2.0, feather * fw)).astype(np.float32) / 255.0
+    x1, y1, x2, y2 = box
+    fade = max(6, int(0.04 * fw))
+    win = np.zeros((h, w), np.float32)
+    win[y1:y2, x1:x2] = 1.0
+    win = cv2.GaussianBlur(cv2.erode(win, np.ones((2 * fade + 1, 2 * fade + 1), np.uint8)), (0, 0), fade / 2.0)
+    return mask * win
+
+
 def sharpen_in_mask(frame_bgr: np.ndarray, mask: np.ndarray, amount: float, sigma: float = 1.6) -> np.ndarray:
     """Unsharp mask applied only where ``mask`` is set (the regenerated mouth is softer than the rest of the face)."""
     import cv2
@@ -193,9 +221,9 @@ def lipsync(motion_video: Path, audio: Path, out: Path, fps: int = FPS, batch_si
     """Lip-sync ``motion_video`` (already looped to the audio length) to ``audio`` → ``out`` (mp4 with audio).
 
     ``options`` (all optional): ``open_scale`` (0.5-1.0: pull the audio features toward silence, i.e. a less wide-open mouth), ``mask`` ("oval" = whole lower
-    face, the original; "mouth" = lips and chin only), ``sharpen`` (unsharp amount inside the mouth mask), ``mask_reach`` (ellipse half-width / face width).
+    face, the original; "mouth" = an ellipse around mouth and chin; "lips" = only the lips and the chin, cheeks stay the stable portrait), ``sharpen`` (unsharp amount inside the mouth mask), ``mask_reach`` (ellipse half-width / face width).
     """
-    opts = {"open_scale": 1.0, "mask": "oval", "sharpen": 0.0, "mask_reach": 0.30, "color_match": 0.0, **(options or {})}
+    opts = {"open_scale": 1.0, "mask": "oval", "sharpen": 0.0, "mask_reach": 0.30, "color_match": 0.0, "lip_dilate": 0.05, "chin_half": 0.22, **(options or {})}
     import cv2
     import mlx.core as mx
 
@@ -245,8 +273,13 @@ def lipsync(motion_video: Path, audio: Path, out: Path, fps: int = FPS, batch_si
             j = j if j < len(frames) else 2 * len(frames) - 1 - j
             lm = lms[j] if lms[j] is not None else last_lm
             frame = frames[j]
-            m = mouth_mask((h, w), lm, boxes[j], reach=opts["mask_reach"]) if opts["mask"] == "mouth" else blend_mask((h, w), lm, boxes[j])
-            if opts["color_match"] > 0 and opts["mask"] == "mouth":
+            if opts["mask"] == "lips":
+                m = lips_chin_mask((h, w), lm, boxes[j], dilate=opts["lip_dilate"], chin_half=opts["chin_half"])
+            elif opts["mask"] == "mouth":
+                m = mouth_mask((h, w), lm, boxes[j], reach=opts["mask_reach"])
+            else:
+                m = blend_mask((h, w), lm, boxes[j])
+            if opts["color_match"] > 0 and opts["mask"] in ("mouth", "lips"):
                 import cv2 as _cv
 
                 x1, y1, x2, y2 = boxes[j]
