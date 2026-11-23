@@ -1,0 +1,7 @@
+{
+  "name": "openmontage-tutorial",
+  "version": "0.1.0",
+  "description": "/tutorial: research a code repo, web page, document or topic and make a presenter-led video tutorial with the OpenMontage topic-tutorial pipeline (engine = your OpenMontage checkout).",
+  "author": { "name": "OpenMontage" },
+  "keywords": ["video", "tutorial", "openmontage", "presenter"]
+}

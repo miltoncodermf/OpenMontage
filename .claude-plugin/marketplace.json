@@ -1,0 +1,12 @@
+{
+  "name": "openmontage-local",
+  "owner": { "name": "OpenMontage" },
+  "description": "Local plugins that drive this OpenMontage checkout.",
+  "plugins": [
+    {
+      "name": "openmontage-tutorial",
+      "source": "./plugins/openmontage-tutorial",
+      "description": "/tutorial: research a code repo, web page, document or topic and make a presenter-led video tutorial with the OpenMontage topic-tutorial pipeline."
+    }
+  ]
+}
