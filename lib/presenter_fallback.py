@@ -19,14 +19,20 @@ def _diagram_for(section: dict[str, Any], beat: dict[str, Any]) -> dict[str, Any
     return {"title": title, "nodes": nodes, "edges": [[nodes[0], nodes[1]], [nodes[1], nodes[2]]]}
 
 
-def replan_without_presenter(scene_plan: dict[str, Any], reason: str) -> dict[str, Any]:
-    """Return a copy of the v2 scene plan with every presenter beat converted to a visual beat."""
+def replan_without_presenter(scene_plan: dict[str, Any], reason: str, only_beat_ids: set[str] | None = None) -> dict[str, Any]:
+    """Return a copy of the v2 scene plan with every presenter beat converted to a visual beat.
+
+    ``only_beat_ids`` limits the conversion to those beats (one presenter segment failed QA, the rest keep the presenter); the policy stays
+    enabled then and ``presenter_status`` becomes ``partial`` with the failed beats listed.
+    """
     plan = copy.deepcopy(scene_plan)
     converted = 0
     for section in plan.get("sections", []):
         for beat in section.get("visual_beats", []):
             vt = beat.get("visual_type")
             layout = beat.get("layout") or {}
+            if only_beat_ids is not None and beat.get("beat_id") not in only_beat_ids:
+                continue
             if vt in PRESENTER_BEATS or layout.get("presenter_pip"):
                 if vt == "presenter_fullscreen":
                     beat["visual_type"] = "diagram"
@@ -40,9 +46,15 @@ def replan_without_presenter(scene_plan: dict[str, Any], reason: str) -> dict[st
                 beat["layout"] = layout
                 beat["presenter_removed"] = True
                 converted += 1
+    meta = plan.setdefault("metadata", {})
+    if only_beat_ids is not None:
+        meta["presenter_status"] = "partial"
+        meta["presenter_status_reason"] = reason
+        meta["presenter_beats_replanned"] = converted
+        meta["presenter_beats_without_presenter"] = sorted(only_beat_ids)
+        return plan
     policy = plan.setdefault("presenter_policy", {})
     policy.update({"enabled": False, "preferred_source": "none", "fallback": "visual_explainer", "pip_allowed": False})
-    meta = plan.setdefault("metadata", {})
     meta["presenter_status"] = "skipped_failed"
     meta["presenter_status_reason"] = reason
     meta["presenter_beats_replanned"] = converted

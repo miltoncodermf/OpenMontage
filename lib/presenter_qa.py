@@ -22,6 +22,8 @@ RAW_HASH_MAX_DISTANCE = 6  # of 256 bits
 BROW_MIRROR_MAX = 0.80  # mirror correlation of the brow series (see check_brow_repetition); real footage 0.66, ping-pong 0.87-0.92
 BROW_AUTOCORR_MAX = 0.75
 BLINKS_PER_MIN = (6.0, 30.0)  # natural range (the owner's own recording: 15/min)
+CREASE_FLICKER_MAX = 0.06  # crease-band edge energy, frame-to-frame (owner: cheek creases fading in and out). C2 0.029, old oval mask 0.076, real speech 0.112
+MOUTH_OPEN_RANGE = (0.03, 0.08)  # mean mouth gap / face width: real speech 0.041, big-mouth default 0.052; below = not speaking, above = gaping
 FACE_SCALE_MAX_VARIATION = 0.03  # head size may vary at most ~3% over the clip (owner feedback: head resizing)
 
 
@@ -225,6 +227,27 @@ def check_blink_rate(lid, fps: float = 25.0, limits: tuple[float, float] = BLINK
     ev = count_blinks(lid, fps)
     rate = ev * 60.0 * fps / n
     return {"status": "run", "passed": limits[0] <= rate <= limits[1], "blinks": ev, "per_minute": round(rate, 1), "limits_per_minute": list(limits), "seconds": round(n / fps, 1)}
+
+
+def check_crease_flicker(crease_l, crease_r, fps: float = 25.0, limit: float = CREASE_FLICKER_MAX) -> dict[str, Any]:
+    """Cheek creases beside the mouth must not pulse in and out while speaking (see lib.mouth_metrics.flicker)."""
+    from lib import mouth_metrics as mm
+
+    if crease_l is None or crease_r is None or len(crease_l) < 25:
+        return {"status": "not_run", "passed": None, "reason": "no crease signal (clip too short or no face found)"}
+    f = [mm.flicker(crease_l, fps), mm.flicker(crease_r, fps)]
+    val = float(np.nanmean([x["flicker"] for x in f]))
+    if not np.isfinite(val):
+        return {"status": "not_run", "passed": None, "reason": "crease signal has too few valid frames"}
+    return {"status": "run", "passed": val <= limit, "flicker": round(val, 4), "pulse": round(float(np.nanmean([x["pulse"] for x in f])), 4), "limit": limit}
+
+
+def check_mouth_opening(open_h, limits: tuple[float, float] = MOUTH_OPEN_RANGE) -> dict[str, Any]:
+    """Mean mouth gap relative to face width stays in a speaking range (not frozen, not gaping)."""
+    if open_h is None or len(open_h) < 25 or not np.isfinite(np.asarray(open_h, dtype=float)).any():
+        return {"status": "not_run", "passed": None, "reason": "no mouth-opening signal"}
+    mean = float(np.nanmean(np.asarray(open_h, dtype=float)))
+    return {"status": "run", "passed": limits[0] <= mean <= limits[1], "mean_open": round(mean, 4), "limits": list(limits)}
 
 
 def default_face_signals() -> Callable[[Path], dict[str, np.ndarray]] | None:

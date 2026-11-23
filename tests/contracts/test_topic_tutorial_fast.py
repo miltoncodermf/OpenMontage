@@ -4014,3 +4014,135 @@ class TestOwnerMouthDefault:
         assert "open_scale" not in mod.NATURAL_MOUTH  # MuseTalk openness stays at its default 1.0 (the big mouth the owner likes)
         args = mod.natural_args()
         assert args[args.index("--lip-gain") + 1] == "0.0"
+
+
+class TestTutorialSegmentBatch:
+    """P6: batched, resumable local-engine presenter segments."""
+
+    def test_motion_plan_covers_each_segment_and_spreads_over_the_pool(self):
+        from lib import twin_segments as ts
+
+        clips = [{"id": "a", "duration_s": 24.0}]
+        plan = ts.plan_motion({"s1": 19.0, "s2": 21.0, "s3": 20.0}, clips, seed=1)
+        for sid, dur in {"s1": 19.0, "s2": 21.0, "s3": 20.0}.items():
+            ps = plan["segments"][sid]
+            covered = sum(p["length"] for p in ps) - ts.OVERLAP_S * (len(ps) - 1)
+            assert covered >= dur + 0.29                              # never runs out of frames
+            assert all(0 <= p["start"] and p["start"] + p["length"] <= 24.0 + 1e-6 for p in ps)
+        assert plan == ts.plan_motion({"s1": 19.0, "s2": 21.0, "s3": 20.0}, clips, seed=1)  # deterministic: a resume rebuilds the same plan
+        # a pool big enough for everything is never replayed; a small one reports the replay honestly
+        big = ts.plan_motion({"s1": 10.0, "s2": 10.0}, [{"id": "a", "duration_s": 60.0}], seed=0)
+        assert big["reuse"]["seconds_replayed_pct"] == 0.0 and big["reuse"]["max_times_any_moment_used"] == 1
+        small = ts.plan_motion({"s1": 30.0, "s2": 30.0}, clips, seed=0)
+        assert small["reuse"]["seconds_replayed_pct"] > 30 and small["reuse"]["max_times_any_moment_used"] >= 2
+
+    def test_motion_plan_prefers_the_closest_boundary_frame(self):
+        from lib import twin_segments as ts
+
+        clips = [{"id": "a", "duration_s": 40.0}]
+        looks_alike = lambda ca, ta, cb, tb: 0.0 if tb == 8.0 else 1.0  # noqa: E731  (the frame at 8 s matches where the previous piece ended)
+        plan = ts.plan_motion({"s1": 14.0}, clips, seed=0, boundary_distance=looks_alike)
+        first, second = plan["segments"]["s1"][:2]
+        assert second["start"] == 8.0 and not (first["start"] < 14.0 and first["start"] + first["length"] > 8.0)
+
+    def test_run_state_resumes_only_when_key_and_output_match(self, tmp_path):
+        from lib import twin_segments as ts
+
+        out = tmp_path / "x.wav"
+        st = ts.RunState(tmp_path)
+        st.mark("s1", "narration", "k1", wall_s=3.0)
+        assert not st.is_done("s1", "narration", "k1", [out])        # output missing (killed mid-write)
+        out.write_text("x")
+        assert ts.RunState(tmp_path).is_done("s1", "narration", "k1", [out])   # reloaded from disk after a kill
+        assert not ts.RunState(tmp_path).is_done("s1", "narration", "k2", [out])  # inputs changed -> redo
+
+    def test_qa_gate_fails_on_a_failed_check_and_blocks_on_not_run_but_tolerates_inconclusive_mouth_sync(self):
+        from lib import twin_segments as ts
+
+        ok = {"face_scale": {"passed": True}, "crease_flicker": {"passed": True}, "mouth_sync": {"passed": None, "status": "inconclusive"}}
+        v = ts.evaluate_qa({"checks": ok})
+        assert v["passed"] and v["warnings"] == ["mouth_sync: inconclusive"]
+        bad = ts.evaluate_qa({"checks": {**ok, "crease_flicker": {"passed": False}}})
+        assert not bad["passed"] and "crease_flicker failed" in bad["reason"]
+        blocked = ts.evaluate_qa({"checks": {**ok, "blink_rate": {"passed": None, "status": "not_run"}}})
+        assert not blocked["passed"] and blocked["not_run_blocking"] == ["blink_rate"]
+
+    def test_crease_flicker_and_mouth_opening_gates(self):
+        import numpy as np
+
+        from lib import presenter_qa as qa
+
+        t = np.arange(150) / 25
+        steady = 1.5 + 0.02 * np.sin(2 * np.pi * 0.1 * t)
+        pulsing = 1.5 + 0.5 * np.sin(2 * np.pi * 4.0 * t)
+        assert qa.check_crease_flicker(steady, steady)["passed"] is True
+        assert qa.check_crease_flicker(pulsing, pulsing)["passed"] is False
+        assert qa.check_crease_flicker(steady[:10], steady[:10])["passed"] is None
+        assert qa.check_mouth_opening(np.full(100, 0.052))["passed"] is True
+        assert qa.check_mouth_opening(np.full(100, 0.005))["passed"] is False   # frozen mouth
+        assert qa.check_mouth_opening(np.full(100, 0.12))["passed"] is False    # gaping
+
+    def test_partial_fallback_converts_only_the_failed_beats(self):
+        from lib.presenter_fallback import replan_without_presenter
+
+        beats = [{"beat_id": f"b{i}", "visual_type": "presenter_fullscreen", "layout": {"preset": "presenter_fullscreen"}} for i in (1, 2, 3)]
+        plan = {"version": "2.0", "sections": [{"section_id": "a", "learning_objective": "X", "visual_beats": beats}], "presenter_policy": {"enabled": True}}
+        out = replan_without_presenter(plan, "segment s2 failed QA: brow_repetition", only_beat_ids={"b2"})
+        vts = [b["visual_type"] for b in out["sections"][0]["visual_beats"]]
+        assert vts == ["presenter_fullscreen", "diagram", "presenter_fullscreen"]
+        assert out["presenter_policy"]["enabled"] is True and out["metadata"]["presenter_status"] == "partial"
+        assert out["metadata"]["presenter_beats_without_presenter"] == ["b2"]
+
+    def test_timing_summary_reports_wall_per_narrated_second(self):
+        from lib import twin_segments as ts
+
+        state = {"segments": {"s1": {"status": "done", "stages": {"lipsync": {"wall_s": 100.0}, "matte": {"wall_s": 60.0}}},
+                              "s2": {"status": "fallback", "stages": {"lipsync": {"wall_s": 50.0}}}}}
+        s = ts.segment_summary(state, {"s1": 20.0, "s2": 10.0})
+        assert s["total_wall_s"] == 210.0 and s["wall_per_narrated_s"] == 7.0 and s["stage_per_narrated_s"]["lipsync"] == 5.0
+        assert s["segments"]["s1"]["wall_per_narrated_s"] == 8.0
+
+
+class TestTextureRestore:
+    """Open item: the regenerated skin above the lip and on the chin is smoother than the portrait (a pale, matte patch)."""
+
+    def _setup(self):
+        import numpy as np
+
+        h, w = 400, 600
+        lm = np.zeros((478, 3), dtype="float32")
+        pts = {234: (200, 160), 454: (400, 160), 61: (260, 260), 291: (340, 260), 152: (330, 335), 2: (300, 225), 0: (300, 250), 17: (300, 275), 37: (285, 252),
+               267: (315, 252), 39: (272, 255), 269: (328, 255), 185: (270, 256), 409: (330, 256), 40: (278, 253), 270: (322, 253), 375: (325, 270), 321: (315, 273),
+               405: (308, 274), 314: (302, 275), 84: (298, 275), 181: (290, 274), 91: (275, 270), 146: (268, 266)}
+        for i, (x, y) in pts.items():
+            lm[i] = (x / w, y / h, 0)
+        rng = np.random.default_rng(0)
+        skin = np.array([150, 170, 200], np.float32)  # BGR, a skin tone
+        src = np.clip(skin + rng.normal(0, 9, (h, w, 3)), 0, 255).astype(np.uint8)  # textured portrait
+        res = np.full((h, w, 3), skin, np.uint8)                                    # smooth regenerated skin
+        yy, xx = np.mgrid[:h, :w]
+        mask = np.exp(-(((xx - 300) / 70.0) ** 2 + ((yy - 300) / 60.0) ** 2)).astype(np.float32)
+        return h, w, lm, src, res, mask
+
+    def test_restores_fine_detail_inside_the_mask_only(self):
+        import numpy as np
+
+        from lib import musetalk_runner as mr
+
+        h, w, lm, src, res, mask = self._setup()
+        out = mr.texture_restore(res, src, mask, lm, amount=1.0)
+        inside = (slice(290, 330), slice(260, 340))
+        assert out[inside][..., 1].astype(float).std() > 3.0 > res[inside][..., 1].astype(float).std() + 0.1   # texture appears where there was none
+        assert np.abs(out[:80].astype(int) - res[:80].astype(int)).max() == 0                  # far outside the mask: untouched
+        assert mr.texture_restore(res, src, mask, lm, amount=0.0) is res
+
+    def test_never_paints_stubble_onto_lips_or_teeth(self):
+        import numpy as np
+
+        from lib import musetalk_runner as mr
+
+        h, w, lm, src, res, mask = self._setup()
+        res = res.copy()
+        res[290:315, 270:330] = (90, 90, 190)   # reddish lower lip of the regenerated mouth (BGR), well inside the mask
+        out = mr.texture_restore(res, src, mask, lm, amount=1.0)
+        assert np.abs(out[296:310, 280:320].astype(int) - res[296:310, 280:320].astype(int)).mean() < 1.0

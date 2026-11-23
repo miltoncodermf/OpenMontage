@@ -194,6 +194,39 @@ def sharpen_in_mask(frame_bgr: np.ndarray, mask: np.ndarray, amount: float, sigm
     return np.clip(out, 0, 255).round().astype(np.uint8)
 
 
+def texture_restore(res_bgr: np.ndarray, src_bgr: np.ndarray, mask: np.ndarray, lm: np.ndarray, amount: float = 1.0, sigma: float = 1.5) -> np.ndarray:
+    """Give the regenerated skin the portrait's own fine texture (stubble, pores).
+
+    MuseTalk decodes a 256 px face, so the pasted skin is smoother than the 1000+ px portrait around it: the stubble shadow above the lip and the
+    chin read as a pale, matte patch. Inside the paste mask, on skin-coloured pixels only (so lips, teeth and the mouth opening are never touched), the
+    pasted frame's high-frequency band is blended toward the source frame's: ``res += amount * gate * (hp(src) - hp(res))``."""
+    import cv2
+
+    if amount <= 0:
+        return res_bgr
+    h, w = res_bgr.shape[:2]
+    pts = lm[:, :2] * np.array([w, h], dtype=np.float32)
+    fw = float(np.linalg.norm(pts[234] - pts[454]))
+    lab = cv2.cvtColor(res_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    lips = np.zeros((h, w), np.uint8)
+    cv2.fillConvexPoly(lips, cv2.convexHull(pts[[61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146]].astype(np.int32)), 255)
+    ref = (mask > 0.15) & (lips == 0)
+    if ref.sum() < 200:
+        return res_bgr
+    # skin statistics come from the cheek-side ring just outside the lips, where nothing but skin lives
+    ring = cv2.dilate(lips, np.ones((int(0.12 * fw) | 1,) * 2, np.uint8)) - cv2.dilate(lips, np.ones((int(0.05 * fw) | 1,) * 2, np.uint8))
+    sel = (ring > 0) & ref
+    sel = sel if sel.sum() >= 200 else ref
+    mu, sd = lab[sel].mean(axis=0), lab[sel].std(axis=0) + 2.0
+    dist = np.sqrt((((lab - mu) / (2.5 * sd)) ** 2).sum(axis=2))
+    gate = cv2.GaussianBlur(np.clip(1.5 - dist, 0.0, 1.0), (0, 0), 1.5)
+    f_res, f_src = res_bgr.astype(np.float32), src_bgr.astype(np.float32)
+    hp_res = f_res - cv2.GaussianBlur(f_res, (0, 0), sigma)
+    hp_src = f_src - cv2.GaussianBlur(f_src, (0, 0), sigma)
+    wgt = (amount * gate * mask)[..., None]
+    return np.clip(f_res + wgt * (hp_src - hp_res), 0, 255).round().astype(np.uint8)
+
+
 def paste_back(frame_bgr: np.ndarray, face_bgr256: np.ndarray, box: tuple[int, int, int, int], mask: np.ndarray) -> np.ndarray:
     import cv2
 
@@ -221,9 +254,9 @@ def lipsync(motion_video: Path, audio: Path, out: Path, fps: int = FPS, batch_si
     """Lip-sync ``motion_video`` (already looped to the audio length) to ``audio`` → ``out`` (mp4 with audio).
 
     ``options`` (all optional): ``open_scale`` (0.5-1.0: pull the audio features toward silence, i.e. a less wide-open mouth), ``mask`` ("oval" = whole lower
-    face, the original; "mouth" = an ellipse around mouth and chin; "lips" = only the lips and the chin, cheeks stay the stable portrait), ``sharpen`` (unsharp amount inside the mouth mask), ``mask_reach`` (ellipse half-width / face width).
+    face, the original; "mouth" = an ellipse around mouth and chin; "lips" = only the lips and the chin, cheeks stay the stable portrait), ``sharpen`` (unsharp amount inside the mouth mask), ``texture`` (0-1: restore the portrait's own stubble/pore detail on skin inside the mask), ``mask_reach`` (ellipse half-width / face width).
     """
-    opts = {"open_scale": 1.0, "mask": "oval", "sharpen": 0.0, "mask_reach": 0.30, "color_match": 0.0, "lip_dilate": 0.05, "chin_half": 0.22, **(options or {})}
+    opts = {"open_scale": 1.0, "mask": "oval", "sharpen": 0.0, "mask_reach": 0.30, "color_match": 0.0, "texture": 0.0, "lip_dilate": 0.05, "chin_half": 0.22, **(options or {})}
     import cv2
     import mlx.core as mx
 
@@ -290,6 +323,8 @@ def lipsync(motion_video: Path, audio: Path, out: Path, fps: int = FPS, batch_si
                 res = (matched.astype(np.float32) * mm_ + frame.astype(np.float32) * (1.0 - mm_)).round().astype(np.uint8)
             else:
                 res = paste_back(frame, faces[i], boxes[j], m)
+            if opts["texture"] > 0:
+                res = texture_restore(res, frame, m, lm, opts["texture"])
             if opts["sharpen"] > 0:
                 res = sharpen_in_mask(res, m, opts["sharpen"])
             cv2.imwrite(str(odir / f"o_{i:06d}.png"), res)
