@@ -26,6 +26,24 @@ from tools.base_tool import (
 )
 
 
+def _audio_input(path: Path):
+    """Pre-decode with ffmpeg to 16 kHz mono float32 so faster-whisper never depends on the
+    installed PyAV version (faster-whisper 1.2 needs a newer PyAV than some environments ship).
+    Falls back to the path when ffmpeg is unavailable."""
+    import subprocess
+
+    try:
+        import numpy as np
+
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"],
+            capture_output=True, check=True, timeout=1800,
+        ).stdout
+        return np.frombuffer(raw, dtype=np.float32)
+    except Exception:  # noqa: BLE001
+        return str(path)
+
+
 class Transcriber(BaseTool):
     name = "transcriber"
     version = "0.1.0"
@@ -160,7 +178,7 @@ class Transcriber(BaseTool):
                 compute_type=selected_compute_type,
             )
             segments_iter, transcription_info = model.transcribe(
-                str(input_path),
+                _audio_input(input_path),
                 language=language,
                 word_timestamps=True,
                 vad_filter=True,

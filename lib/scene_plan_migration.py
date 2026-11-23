@@ -65,7 +65,7 @@ def migrate_scene_plan_v1_to_v2(v1_data: dict[str, Any]) -> dict[str, Any]:
         "canvas": {"width": 1920, "height": 1080, "aspect_ratio": "16:9"},
         "presenter_policy": {
             "enabled": any("presenter" in b["visual_type"] for s in sections for b in s["visual_beats"]),
-            "preferred_source": "recorded_video",
+            "preferred_source": "twin_auto",
             "fallback": "visual_explainer",
             "pip_allowed": True,
         },

@@ -1,0 +1,15 @@
+# Playbook verification state for topic-tutorial (sidecar; lives here, not in styles/, because the playbook loader globs styles/topic-tutorial/*.yaml) (decision D20, spec §5.10).
+# A playbook is `verified: true` only after the owner approved a real end-to-end run in it at the
+# compose gate. Others stay selectable but are labelled unverified in the proposal.
+software-technical:
+  verified: true           # flipped after the owner approved the no-presenter validation run at the compose gate (fix round, Group E)
+  verified_by_run: topic-tutorial-validation
+  verified_on: "2026-11-15"
+ai-news-explainer:
+  verified: false
+finance-data:
+  verified: false
+history-timeline:
+  verified: false
+science-math:
+  verified: false

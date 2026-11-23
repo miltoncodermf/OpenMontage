@@ -1,13 +1,12 @@
 """Universal Input Ingestor for OpenMontage topic-tutorial pipeline.
 
-Normalizes supported local files, directories, repositories, URLs, and media
-into a provenance-aware source bundle with SHA-256 hashes, secret redaction,
+Normalizes the supported topic-tutorial inputs (code repositories, markdown/text,
+PDFs with a text layer, and public URLs) into a provenance-aware source bundle with SHA-256 hashes, secret redaction,
 and fact extraction.
 """
 
 from __future__ import annotations
 
-import csv
 import fnmatch
 import hashlib
 import ipaddress
@@ -15,7 +14,6 @@ import json
 import os
 import re
 import socket
-import subprocess
 import time
 import urllib.parse
 from pathlib import Path
@@ -33,9 +31,6 @@ from tools.base_tool import (
     ToolStatus,
     ToolTier,
 )
-
-# Media file extensions exempt from in-memory byte loading
-MEDIA_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".wav", ".mp3", ".m4a", ".aac"}
 
 # Secret file and pattern regexes
 SECRET_FILE_PATTERNS = [
@@ -132,7 +127,7 @@ class UniversalIngestor(BaseTool):
         "local_file_ingestion",
         "directory_scan",
         "code_repository_ingestion",
-        "document_extraction",
+        "pdf_text_extraction",
         "secret_redaction",
         "provenance_tracking",
     ]
@@ -142,24 +137,22 @@ class UniversalIngestor(BaseTool):
         "text": True,
         "code": True,
         "pdf": True,
-        "docx": True,
-        "pptx": True,
-        "xlsx": True,
-        "csv": True,
         "urls": True,
-        "media": True,
     }
 
     best_for = [
         "universal material intake for tutorial and explainer pipelines",
         "codebase and documentation extraction with secret redaction",
-        "multi-format research asset bundling",
+        "repo, URL and PDF research intake (no office/media formats in v3)",
     ]
 
     input_schema = {
         "type": "object",
-        "required": ["input_path"],
         "properties": {
+            "inputs_spec": {
+                "type": "object",
+                "description": "Parsed inputs.yaml: {topic?, repos:[{path,focus[]}], urls[], pdfs[]}",
+            },
             "input_path": {
                 "type": "string",
                 "description": "Path to a file, directory, repository, or a web URL",
@@ -204,10 +197,13 @@ class UniversalIngestor(BaseTool):
         return 0.0
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
+        """Ingest either a single ``input_path`` (legacy) or a full ``inputs_spec``
+        (the parsed ``inputs.yaml``: topic / repos / urls / pdfs — spec D11)."""
         started = time.time()
+        spec = inputs.get("inputs_spec")
         input_target = str(inputs.get("input_path", "")).strip()
-        if not input_target:
-            return ToolResult(success=False, error="input_path must be a non-empty path or URL")
+        if not spec and not input_target:
+            return ToolResult(success=False, error="provide input_path or inputs_spec (topic/repos/urls/pdfs)")
 
         project_dir_str = inputs.get("project_dir")
         project_dir = Path(project_dir_str) if project_dir_str else Path.cwd()
@@ -219,37 +215,56 @@ class UniversalIngestor(BaseTool):
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         sources: list[dict[str, Any]] = []
-        source_counter = 1
+        topic: Optional[str] = None
+        retrieved_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-        is_url = input_target.startswith("http://") or input_target.startswith("https://")
+        def next_id() -> str:
+            return f"src_{len(sources) + 1:03d}"
 
-        if is_url:
-            src_info = self._ingest_url(input_target, f"src_{source_counter:03d}")
-            sources.append(src_info)
+        def add(src: dict[str, Any], mode: str) -> None:
+            src["mode"] = mode
+            src["retrieved_at"] = retrieved_at
+            sources.append(src)
+
+        if spec:
+            topic = (spec.get("topic") or "").strip() or None
+            for repo in spec.get("repos") or []:
+                root = Path(str(repo["path"])).expanduser()
+                if not root.is_dir():
+                    add({"source_id": next_id(), "file_path": str(root), "filename": root.name, "status": "unsupported",
+                         "error": "Repo path is not a directory", "sha256": None, "word_count": 0, "byte_size": 0, "content": ""}, "repo")
+                    continue
+                focus = [str(f).strip("/") for f in (repo.get("focus") or [])]
+                # focus is applied while walking, so max_files counts focused files (not the first N of the whole repo)
+                files = self._collect_directory_files(root, max_files, focus=focus or None)
+                for fpath in files:
+                    add(self._ingest_file(fpath, next_id(), max_file_size_bytes, allowed_root=root), "repo")
+            for url in spec.get("urls") or []:
+                add(self._ingest_url(str(url), next_id()), "url")
+            for pdf in spec.get("pdfs") or []:
+                pdf_path = Path(str(pdf)).expanduser()
+                if not pdf_path.is_absolute():
+                    pdf_path = project_dir / "inputs" / pdf_path if not (project_dir / pdf_path).exists() else project_dir / pdf_path
+                if pdf_path.suffix.lower() != ".pdf":
+                    add({"source_id": next_id(), "file_path": str(pdf_path), "filename": pdf_path.name, "status": "unsupported",
+                         "error": "pdfs[] entries must be .pdf files", "sha256": None, "word_count": 0, "byte_size": 0, "content": ""}, "pdf")
+                elif not pdf_path.is_file():
+                    add({"source_id": next_id(), "file_path": str(pdf_path), "filename": pdf_path.name, "status": "unsupported",
+                         "error": "PDF not found", "sha256": None, "word_count": 0, "byte_size": 0, "content": ""}, "pdf")
+                else:
+                    add(self._ingest_file(pdf_path, next_id(), max_file_size_bytes, allowed_root=pdf_path.parent), "pdf")
+        elif input_target.startswith(("http://", "https://")):
+            add(self._ingest_url(input_target, next_id()), "url")
         else:
             target_path = Path(input_target).expanduser()
             if not target_path.exists():
                 return ToolResult(success=False, error=f"Target path does not exist: {target_path}")
-
             if target_path.is_file():
-                src_info = self._ingest_file(
-                    target_path,
-                    f"src_{source_counter:03d}",
-                    max_file_size_bytes,
-                    allowed_root=target_path.parent,
-                )
-                sources.append(src_info)
+                add(self._ingest_file(target_path, next_id(), max_file_size_bytes, allowed_root=target_path.parent),
+                    "pdf" if target_path.suffix.lower() == ".pdf" else "repo")
             elif target_path.is_dir():
-                file_list = self._collect_directory_files(target_path, max_files)
-                for fpath in file_list:
-                    src_info = self._ingest_file(
-                        fpath,
-                        f"src_{source_counter:03d}",
-                        max_file_size_bytes,
-                        allowed_root=target_path,
-                    )
-                    sources.append(src_info)
-                    source_counter += 1
+                for fpath in self._collect_directory_files(target_path, max_files):
+                    add(self._ingest_file(fpath, next_id(), max_file_size_bytes, allowed_root=target_path), "repo")
 
         # Fact sheet generation - only from prose documents, never raw code
         facts: list[dict[str, Any]] = []
@@ -259,10 +274,9 @@ class UniversalIngestor(BaseTool):
                 if (
                     src.get("status") == "supported"
                     and src.get("content")
-                    and src.get("file_type") in {"text", "pdf", "docx", "pptx", "url"}
+                    and src.get("file_type") in {"text", "pdf", "url"}
                 ):
-                    extracted = self._extract_facts(src["content"], src["source_id"])
-                    for fact in extracted:
+                    for fact in self._extract_facts(src["content"], src["source_id"], src):
                         fact["fact_id"] = f"fact_{fact_counter:03d}"
                         facts.append(fact)
                         fact_counter += 1
@@ -270,12 +284,15 @@ class UniversalIngestor(BaseTool):
         total_words = sum(s.get("word_count", 0) for s in sources)
         supported_count = sum(1 for s in sources if s.get("status") == "supported")
         unsupported_count = len(sources) - supported_count
+        modes = sorted({s["mode"] for s in sources} | ({"topic"} if topic else set()))
 
         input_manifest = {
             "schema_version": "1.0",
-            "ingested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "input_target": input_target,
+            "ingested_at": retrieved_at,
+            "input_target": input_target or "inputs.yaml",
             "project_dir": str(project_dir),
+            "topic": topic,
+            "modes": modes,
             "summary": {
                 "total_sources": len(sources),
                 "supported_sources": supported_count,
@@ -287,7 +304,7 @@ class UniversalIngestor(BaseTool):
 
         fact_sheet = {
             "schema_version": "1.0",
-            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "generated_at": retrieved_at,
             "total_facts": len(facts),
             "facts": facts,
         }
@@ -307,6 +324,7 @@ class UniversalIngestor(BaseTool):
             data={
                 "input_manifest": str(manifest_path),
                 "fact_sheet": str(fact_sheet_path),
+                "modes": modes,
                 "total_sources": len(sources),
                 "supported_sources": supported_count,
                 "unsupported_sources": unsupported_count,
@@ -318,7 +336,7 @@ class UniversalIngestor(BaseTool):
             cost_usd=0.0,
         )
 
-    def _collect_directory_files(self, root_dir: Path, max_files: int) -> list[Path]:
+    def _collect_directory_files(self, root_dir: Path, max_files: int, focus: Optional[list[str]] = None) -> list[Path]:
         collected: list[Path] = []
         root_resolved = root_dir.resolve()
         git_ignore_patterns = [
@@ -345,25 +363,46 @@ class UniversalIngestor(BaseTool):
                 with open(gitignore_file, "r", encoding="utf-8", errors="ignore") as f:
                     for line in f:
                         line = line.strip()
-                        if line and not line.startswith("#"):
-                            git_ignore_patterns.append(line)
+                        if line and not line.startswith(("#", "!")):
+                            # ".gitignore" directory entries end with "/" (and may start with "/"); fnmatch needs the bare name
+                            git_ignore_patterns.append(line.strip("/") or line)
             except Exception:
                 pass
 
-        for root, dirs, files in os.walk(root_dir):
-            rel_root = Path(root).relative_to(root_dir)
-            dirs[:] = [
-                d for d in dirs
-                if not any(fnmatch.fnmatch(str(rel_root / d), pat) or fnmatch.fnmatch(d, pat) for pat in git_ignore_patterns)
-            ]
-            for file in sorted(files):
-                full_path = Path(root) / file
-                rel_path = rel_root / file
-                if any(fnmatch.fnmatch(str(rel_path), pat) or fnmatch.fnmatch(file, pat) for pat in git_ignore_patterns):
-                    continue
-                collected.append(full_path)
-                if len(collected) >= max_files:
-                    return collected
+        def _ignored(rel: Path, name: str) -> bool:
+            return any(fnmatch.fnmatch(str(rel), pat) or fnmatch.fnmatch(name, pat) for pat in git_ignore_patterns)
+
+        # With a focus list, walk only those files/dirs (still under root, still honouring ignore patterns).
+        starts: list[Path] = [root_dir]
+        if focus:
+            starts = []
+            for fo in focus:
+                cand = (root_dir / fo).resolve()
+                if cand != root_resolved and root_resolved not in cand.parents:
+                    continue  # focus entry escapes the repo root
+                if cand.exists():
+                    starts.append(cand)
+            if not starts:
+                return collected
+
+        for start in starts:
+            if start.is_file():
+                if not _ignored(start.relative_to(root_resolved), start.name):
+                    collected.append(start)
+                    if len(collected) >= max_files:
+                        return collected
+                continue
+            for root, dirs, files in os.walk(start):
+                rel_root = Path(root).resolve().relative_to(root_resolved)
+                dirs.sort()
+                dirs[:] = [d for d in dirs if not _ignored(rel_root / d, d)]
+                for file in sorted(files):
+                    rel_path = rel_root / file
+                    if _ignored(rel_path, file):
+                        continue
+                    collected.append(Path(root) / file)
+                    if len(collected) >= max_files:
+                        return collected
         return collected
 
     def _ingest_file(
@@ -450,49 +489,6 @@ class UniversalIngestor(BaseTool):
         suffix = path.suffix.lower()
         byte_size = path.stat().st_size
 
-        # 3. Media files: exempt from max_file_size_bytes (allow up to 2GB) and avoid reading into RAM
-        if suffix in MEDIA_SUFFIXES:
-            if byte_size > 2 * 1024 * 1024 * 1024:
-                return {
-                    "source_id": source_id,
-                    "file_path": rel_str,
-                    "filename": filename,
-                    "status": "unsupported",
-                    "error": f"Media size ({byte_size} bytes) exceeds 2GB ceiling",
-                    "sha256": None,
-                    "word_count": 0,
-                    "byte_size": byte_size,
-                    "content": "",
-                }
-            try:
-                sha256_hash = _hash_file_stream(path)
-                media_meta = self._probe_media(path)
-                return {
-                    "source_id": source_id,
-                    "file_path": rel_str,
-                    "filename": filename,
-                    "file_type": "media",
-                    "status": "supported",
-                    "sha256": sha256_hash,
-                    "metadata": media_meta,
-                    "word_count": 0,
-                    "byte_size": byte_size,
-                    "summary": f"Media file: duration={media_meta.get('duration_s', 0)}s, format={suffix.lstrip('.')}",
-                    "content": f"Media file {filename} (Duration: {media_meta.get('duration_s')}s, Codec: {media_meta.get('codec')})",
-                }
-            except Exception as exc:
-                return {
-                    "source_id": source_id,
-                    "file_path": rel_str,
-                    "filename": filename,
-                    "status": "unsupported",
-                    "error": f"Media probe error: {exc}",
-                    "sha256": None,
-                    "word_count": 0,
-                    "byte_size": byte_size,
-                    "content": "",
-                }
-
         # 4. Check size for documents and code
         if byte_size > max_file_size_bytes:
             return {
@@ -572,7 +568,7 @@ class UniversalIngestor(BaseTool):
                         extracted = page.extract_text() or ""
                         if extracted:
                             pages_text.append(extracted)
-                    full_text = "\n\n".join(pages_text)
+                    full_text = "\f".join(pages_text)
                     if not full_text.strip():
                         return {
                             "source_id": source_id,
@@ -608,143 +604,6 @@ class UniversalIngestor(BaseTool):
                         "file_type": "pdf",
                         "status": "unsupported",
                         "error": f"PDF parse error: {exc}",
-                        "sha256": sha256_hash,
-                        "word_count": 0,
-                        "byte_size": byte_size,
-                        "content": "",
-                    }
-
-            # Word (.docx)
-            if suffix == ".docx":
-                try:
-                    import docx
-                    doc = docx.Document(path)
-                    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-                    full_text = "\n".join(paragraphs)
-                    full_text = _redact_secrets(full_text)
-                    return {
-                        "source_id": source_id,
-                        "file_path": rel_str,
-                        "filename": filename,
-                        "file_type": "docx",
-                        "status": "supported",
-                        "sha256": sha256_hash,
-                        "word_count": len(full_text.split()),
-                        "byte_size": byte_size,
-                        "summary": full_text[:200].replace("\n", " ") + "...",
-                        "content": full_text,
-                    }
-                except Exception as exc:
-                    return {
-                        "source_id": source_id,
-                        "file_path": rel_str,
-                        "filename": filename,
-                        "file_type": "docx",
-                        "status": "unsupported",
-                        "error": f"DOCX parse error: {exc}",
-                        "sha256": sha256_hash,
-                        "word_count": 0,
-                        "byte_size": byte_size,
-                        "content": "",
-                    }
-
-            # PowerPoint (.pptx)
-            if suffix == ".pptx":
-                try:
-                    from pptx import Presentation
-                    prs = Presentation(path)
-                    slide_texts = []
-                    for idx, slide in enumerate(prs.slides):
-                        slide_parts = []
-                        for shape in slide.shapes:
-                            if hasattr(shape, "text") and shape.text.strip():
-                                slide_parts.append(shape.text.strip())
-                        if slide_parts:
-                            slide_texts.append(f"--- Slide {idx + 1} ---\n" + "\n".join(slide_parts))
-                    full_text = "\n\n".join(slide_texts)
-                    full_text = _redact_secrets(full_text)
-                    return {
-                        "source_id": source_id,
-                        "file_path": rel_str,
-                        "filename": filename,
-                        "file_type": "pptx",
-                        "slides_count": len(prs.slides),
-                        "status": "supported",
-                        "sha256": sha256_hash,
-                        "word_count": len(full_text.split()),
-                        "byte_size": byte_size,
-                        "summary": full_text[:200].replace("\n", " ") + "...",
-                        "content": full_text,
-                    }
-                except Exception as exc:
-                    return {
-                        "source_id": source_id,
-                        "file_path": rel_str,
-                        "filename": filename,
-                        "file_type": "pptx",
-                        "status": "unsupported",
-                        "error": f"PPTX parse error: {exc}",
-                        "sha256": sha256_hash,
-                        "word_count": 0,
-                        "byte_size": byte_size,
-                        "content": "",
-                    }
-
-            # Excel (.xlsx) & CSV (.csv)
-            if suffix == ".csv":
-                text = raw_bytes.decode("utf-8", errors="replace")
-                text = _redact_secrets(text)
-                reader = list(csv.reader(text.splitlines()))
-                return {
-                    "source_id": source_id,
-                    "file_path": rel_str,
-                    "filename": filename,
-                    "file_type": "csv",
-                    "rows_count": len(reader),
-                    "status": "supported",
-                    "sha256": sha256_hash,
-                    "word_count": len(text.split()),
-                    "byte_size": byte_size,
-                    "summary": f"CSV dataset with {len(reader)} rows",
-                    "content": text[:10000],
-                }
-
-            if suffix == ".xlsx":
-                try:
-                    import openpyxl
-                    wb = openpyxl.load_workbook(path, data_only=True)
-                    sheet_texts = []
-                    for sheet in wb.sheetnames:
-                        ws = wb[sheet]
-                        rows = []
-                        for row in ws.iter_rows(values_only=True):
-                            non_empty = [str(cell) for cell in row if cell is not None]
-                            if non_empty:
-                                rows.append(" | ".join(non_empty))
-                        if rows:
-                            sheet_texts.append(f"--- Sheet: {sheet} ---\n" + "\n".join(rows[:100]))
-                    full_text = "\n\n".join(sheet_texts)
-                    full_text = _redact_secrets(full_text)
-                    return {
-                        "source_id": source_id,
-                        "file_path": rel_str,
-                        "filename": filename,
-                        "file_type": "xlsx",
-                        "status": "supported",
-                        "sha256": sha256_hash,
-                        "word_count": len(full_text.split()),
-                        "byte_size": byte_size,
-                        "summary": f"Excel workbook ({len(wb.sheetnames)} sheets)",
-                        "content": full_text,
-                    }
-                except Exception as exc:
-                    return {
-                        "source_id": source_id,
-                        "file_path": rel_str,
-                        "filename": filename,
-                        "file_type": "xlsx",
-                        "status": "unsupported",
-                        "error": f"XLSX parse error: {exc}",
                         "sha256": sha256_hash,
                         "word_count": 0,
                         "byte_size": byte_size,
@@ -800,14 +659,32 @@ class UniversalIngestor(BaseTool):
             import requests
             from bs4 import BeautifulSoup
 
+            # Follow up to 5 redirects manually so every hop is SSRF-validated (requests would follow blindly).
+            final_url = url
+            resp = None
+            for _hop in range(6):
+                resp = requests.get(
+                    final_url,
+                    timeout=15,
+                    headers={"User-Agent": "OpenMontage-UniversalIngestor/1.1"},
+                    stream=True,
+                    allow_redirects=False,
+                )
+                if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("Location"):
+                    nxt = urllib.parse.urljoin(final_url, resp.headers["Location"])
+                    resp.close()
+                    hop_err = _validate_public_url(nxt)
+                    if hop_err:
+                        return {
+                            "source_id": source_id, "file_path": url, "filename": url, "file_type": "url",
+                            "status": "unsupported", "error": f"redirect to {nxt} refused: {hop_err}",
+                            "sha256": sha256_hash, "word_count": 0, "byte_size": 0, "content": "",
+                        }
+                    final_url = nxt
+                    continue
+                break
             # Stream response and cap at 5MB
-            with requests.get(
-                url,
-                timeout=15,
-                headers={"User-Agent": "OpenMontage-UniversalIngestor/1.1"},
-                stream=True,
-                allow_redirects=False,
-            ) as resp:
+            with resp:
                 if resp.status_code != 200:
                     return {
                         "source_id": source_id,
@@ -866,45 +743,48 @@ class UniversalIngestor(BaseTool):
                 "content": "",
             }
 
-    def _probe_media(self, path: Path) -> dict[str, Any]:
-        try:
-            cmd = [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration,size:stream=codec_name,width,height",
-                "-of", "json", str(path)
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            info = json.loads(res.stdout)
-            fmt = info.get("format", {})
-            streams = info.get("streams", [{}])
-            stream0 = streams[0] if streams else {}
-            return {
-                "duration_s": round(float(fmt.get("duration", 0)), 2),
-                "codec": stream0.get("codec_name", "unknown"),
-                "width": stream0.get("width"),
-                "height": stream0.get("height"),
-            }
-        except Exception:
-            return {"duration_s": 0.0, "codec": "unknown"}
-
-    def _extract_facts(self, text: str, source_id: str) -> list[dict[str, Any]]:
+    def _extract_facts(
+        self, text: str, source_id: str, source: Optional[dict[str, Any]] = None
+    ) -> list[dict[str, Any]]:
+        """Heuristic claim candidates with a precise source_ref (file+line, PDF page, or URL)."""
+        source = source or {}
+        file_type = source.get("file_type")
+        origin = source.get("file_path", "")
+        retrieved_at = source.get("retrieved_at") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         facts: list[dict[str, Any]] = []
-        lines = text.splitlines()
-        for line in lines:
-            line_str = line.strip().lstrip("-*#0123456789. ")
-            # Prompt injection defense
-            if PROMPT_INJECTION_REGEX.search(line_str):
-                continue
-
-            if 25 < len(line_str) < 300:
-                if re.search(r"(\d+%|\$\d+|\b\d{4}\b|\bcores\b|\bGB\b|\bMB\b|\bsec\b|\barchitecture\b|\bpipeline\b|\bmodule\b|\bstage\b)", line_str, re.IGNORECASE):
-                    facts.append({
-                        "claim": line_str,
-                        "source_id": source_id,
-                        "context": line.strip()[:150],
-                        "verified": False,
-                        "untrusted_source": True,
-                    })
-                    if len(facts) >= 20:
-                        break
+        lineno = 0
+        for page, page_text in enumerate(text.split("\f"), start=1):
+            for line in page_text.split("\n"):
+                lineno += 1
+                clean = line
+                line_str = clean.strip().lstrip("-*#0123456789. ")
+                # Prompt injection defense
+                if PROMPT_INJECTION_REGEX.search(line_str):
+                    continue
+                if not (25 < len(line_str) < 300):
+                    continue
+                if not re.search(r"(\d+%|\$\d+|\b\d{4}\b|\bcores\b|\bGB\b|\bMB\b|\bsec\b|\barchitecture\b|\bpipeline\b|\bmodule\b|\bstage\b)", line_str, re.IGNORECASE):
+                    continue
+                if file_type == "url":
+                    source_ref: dict[str, Any] = {"kind": "url", "url": origin}
+                elif file_type == "pdf":
+                    source_ref = {"kind": "pdf", "file": origin, "page": page}
+                else:
+                    source_ref = {"kind": "file", "file": origin, "line": lineno}
+                fact: dict[str, Any] = {
+                    "claim": line_str,
+                    "source_id": source_id,
+                    "source_ref": source_ref,
+                    "retrieved_at": retrieved_at,
+                    "confidence": "low",
+                    "corroborated_by": [],
+                    "context": clean.strip()[:150],
+                    "verified": False,
+                    "untrusted_source": True,
+                }
+                if file_type == "url":
+                    fact["source_url"] = origin
+                facts.append(fact)
+                if len(facts) >= 20:
+                    return facts
         return facts

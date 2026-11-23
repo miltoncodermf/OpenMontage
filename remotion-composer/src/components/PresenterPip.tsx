@@ -8,6 +8,7 @@ import {
   useVideoConfig,
 } from "remotion";
 import { resolveAsset } from "../lib/resolveAsset";
+import { getLayout, toPx } from "../layouts";
 
 export interface PresenterPipProps {
   presenterSrc: string;
@@ -17,6 +18,8 @@ export interface PresenterPipProps {
   accentColor?: string;
   borderRadius?: number;
   label?: string;
+  /** Presenter clip carries an alpha channel (ProRes 4444 / VP9): composite it as a separate layer. */
+  alpha?: boolean;
   children?: React.ReactNode;
 }
 
@@ -28,44 +31,28 @@ export const PresenterPip: React.FC<PresenterPipProps> = ({
   accentColor = "#22D3EE",
   borderRadius = 16,
   label,
+  alpha = false,
   children,
 }) => {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
 
-  const canvasWidth = width || 1920;
-  const canvasHeight = height || 1080;
-
-  const pipWidth = Math.round(canvasWidth * (pipWidthPercent / 100));
-  const pipHeight = Math.round(pipWidth * (9 / 16)); // 16:9 ratio
-
-  const marginX = Math.round(canvasWidth * 0.05); // 5% margin
-  const marginY = Math.round(canvasHeight * 0.06); // 6% margin
+  const canvas = { width: width || 1920, height: height || 1080 };
+  // Normalized layout (aspect-aware) -> pixels from the active canvas.
+  const rect = toPx(getLayout(canvas.width, canvas.height).pip(position, pipWidthPercent / 100, canvas), canvas);
 
   const posStyle: React.CSSProperties = {
     position: "absolute",
-    width: pipWidth,
-    height: pipHeight,
+    left: rect.x,
+    top: rect.y,
+    width: rect.w,
+    height: rect.h,
     borderRadius,
     overflow: "hidden",
-    boxShadow: `0 16px 36px rgba(0, 0, 0, 0.6), 0 0 20px ${accentColor}25`,
-    border: `2px solid ${accentColor}80`,
+    boxShadow: alpha ? "none" : `0 16px 36px rgba(0, 0, 0, 0.6), 0 0 20px ${accentColor}25`,
+    border: alpha ? "none" : `2px solid ${accentColor}80`,
     zIndex: 40,
   };
-
-  if (position === "bottom-right") {
-    posStyle.right = marginX;
-    posStyle.bottom = marginY + 60; // Keep slightly above caption zone
-  } else if (position === "bottom-left") {
-    posStyle.left = marginX;
-    posStyle.bottom = marginY + 60;
-  } else if (position === "top-right") {
-    posStyle.right = marginX;
-    posStyle.top = marginY;
-  } else {
-    posStyle.left = marginX;
-    posStyle.top = marginY;
-  }
 
   const entrance = spring({
     frame,
@@ -85,17 +72,18 @@ export const PresenterPip: React.FC<PresenterPipProps> = ({
           opacity: entrance,
           transform: `scale(${interpolate(entrance, [0, 1], [0.85, 1])})`,
           willChange: "transform, opacity",
-          backgroundColor: "#0F172A",
+          backgroundColor: alpha ? "transparent" : "#0F172A",
         }}
       >
         <OffthreadVideo
           src={resolveAsset(presenterSrc)}
           startFrom={Math.round(startFrom * fps)}
           muted
+          transparent={alpha}
           style={{
             width: "100%",
             height: "100%",
-            objectFit: "cover",
+            objectFit: alpha ? "contain" : "cover",
           }}
         />
 
@@ -109,7 +97,7 @@ export const PresenterPip: React.FC<PresenterPipProps> = ({
               background: "rgba(15, 23, 42, 0.8)",
               padding: "2px 8px",
               borderRadius: 6,
-              fontSize: 11,
+              fontSize: Math.round(canvas.height * 0.016),
               fontWeight: 700,
               color: accentColor,
               fontFamily: "Space Grotesk, Inter, sans-serif",

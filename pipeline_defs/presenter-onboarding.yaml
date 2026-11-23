@@ -1,0 +1,111 @@
+name: presenter-onboarding
+version: "1.0"
+description: >
+  One-time pipeline that builds the owner's private presenter profile for topic-tutorial
+  (spec docs/topic-tutorial-v3-handoff.md D3-D5, D9, §5.5-5.6): validates the owner's raw
+  recordings (source material only, never rendered), builds and locks a beautified photoreal
+  identity with the Gemini image API, designs and locks a presenter voice, and writes a
+  hash-locked profile to ~/.openmontage/presenter_profiles/<profile_id>/ (mode 700, outside git).
+category: custom
+stability: beta
+default_checkpoint_policy: guided
+
+orchestration:
+  mode: executive-producer
+  skill: pipelines/presenter-onboarding/executive-producer
+  budget_default_usd: 0.00
+  max_revisions_per_stage: 3
+  max_send_backs: 3
+
+required_skills:
+  - pipelines/presenter-onboarding/executive-producer
+  - pipelines/presenter-onboarding/capture-session-director
+  - pipelines/presenter-onboarding/identity-build-director
+  - pipelines/presenter-onboarding/identity-lock-director
+  - pipelines/presenter-onboarding/voice-lab-director
+  - pipelines/presenter-onboarding/voice-lock-director
+  - meta/checkpoint-protocol
+
+stages:
+  - name: capture_session
+    skill: pipelines/presenter-onboarding/capture-session-director
+    produces:
+      - recording_validation
+    tools_available:
+      - presenter_profile
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Recording protocol printed; owner recorded face turn, performance and voice read
+      - Every recording passed ffprobe validation (1080p+, duration, audio level and noise floor)
+      - Raw files stored only inside the private profile raw/ directory
+    success_criteria:
+      - "raw face_turn, performance and voice_read recordings registered in profile.json with sha256"
+
+  - name: identity_build
+    skill: pipelines/presenter-onboarding/identity-build-director
+    required_artifacts_in:
+      - recording_validation
+    produces:
+      - identity_candidates
+    tools_available:
+      - twin_identity
+      - google_imagen
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Stills extracted with MediaPipe face detection (no InsightFace weights)
+      - 4-6 subtle beautified candidates plus 2-3 starter wardrobe variants
+      - Paid Gemini image calls announced, itemized and owner-approved first
+    success_criteria:
+      - identity/candidates/cand_*.png exist and read as clearly the owner
+
+  - name: identity_lock
+    skill: pipelines/presenter-onboarding/identity-lock-director
+    required_artifacts_in:
+      - identity_candidates
+    produces:
+      - identity_pick
+    tools_available:
+      - twin_identity
+      - presenter_profile
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Owner picked the canonical portrait (and any tweaks)
+    success_criteria:
+      - identity/canonical.png set; picked_candidate recorded
+
+  - name: voice_lab
+    skill: pipelines/presenter-onboarding/voice-lab-director
+    required_artifacts_in:
+      - identity_pick
+    produces:
+      - voice_candidates
+    tools_available:
+      - voice_lab
+      - mlx_tts
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - About 8 candidates reading the same paragraph through the same polish chain
+      - Chatterbox availability stated honestly; no silent engine substitution
+    success_criteria:
+      - voice/candidates/index.html with a player and recipe per candidate
+
+  - name: voice_lock
+    skill: pipelines/presenter-onboarding/voice-lock-director
+    required_artifacts_in:
+      - voice_candidates
+    produces:
+      - presenter_profile
+    tools_available:
+      - voice_lab
+      - presenter_profile
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Owner picked the voice; recipe locked in voice_profile.json
+      - Profile locked with sha256 hashes of every file
+    success_criteria:
+      - "Schema-valid presenter_profile, locked true, and verify_profile returns no problems"

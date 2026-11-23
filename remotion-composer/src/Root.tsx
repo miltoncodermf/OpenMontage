@@ -130,7 +130,10 @@ const calculateMetadata: CalculateMetadataFunction<ExplainerProps> = async ({
   const lastEnd = Math.max(...cuts.map((c) => c.out_seconds || 0));
   // Add 1 second padding for final fade (overridable, e.g. 0 for shorts that end on footage)
   const tail = typeof props.tailPaddingSeconds === "number" ? props.tailPaddingSeconds : 1;
-  return { durationInFrames: Math.ceil((lastEnd + tail) * 30) };
+  // Canvas comes from props (topic-tutorial §5.9): the same scene plan can target 16:9 or 9:16.
+  const canvas = (props as { canvas?: { width?: number; height?: number } }).canvas;
+  const size = canvas && canvas.width && canvas.height ? { width: canvas.width, height: canvas.height } : {};
+  return { durationInFrames: Math.ceil((lastEnd + tail) * 30), ...size };
 };
 
 export const Root: React.FC = () => {

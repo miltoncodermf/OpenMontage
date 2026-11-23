@@ -119,6 +119,14 @@
           "usable_as": {
             "type": "string",
             "description": "How this could be used: hook, stat_card, script_anchor, closing_punch"
+          },
+          "source_ref": {
+            "description": "topic-tutorial: URL, file+line, or PDF page backing this claim (enforced by lib/research_contract.py).",
+            "oneOf": [
+              { "type": "object", "required": ["kind", "file", "line"], "properties": { "kind": { "const": "file" }, "file": { "type": "string" }, "line": { "type": "integer", "minimum": 1 } } },
+              { "type": "object", "required": ["kind", "file", "page"], "properties": { "kind": { "const": "pdf" }, "file": { "type": "string" }, "page": { "type": "integer", "minimum": 1 } } },
+              { "type": "object", "required": ["kind", "url"], "properties": { "kind": { "const": "url" }, "url": { "type": "string" } } }
+            ]
           }
         },
         "additionalProperties": false
@@ -215,6 +223,27 @@
         "additionalProperties": false
       },
       "description": "How the best existing content visualizes this topic"
+    },
+    "media_candidates": {
+      "type": "array",
+      "description": "topic-tutorial media sourcing candidates; rights fields are required (spec §5.4b).",
+      "items": {
+        "type": "object",
+        "required": ["candidate_id", "kind", "rights_status", "license", "source_url", "attribution", "retrieved_at"],
+        "properties": {
+          "candidate_id": { "type": "string" },
+          "kind": { "type": "string", "enum": ["image", "clip", "screenshot", "recording"] },
+          "tier": { "type": "string", "enum": ["self_captured", "open_licensed", "press_kit", "attributed_screenshot"] },
+          "rights_status": { "type": "string" },
+          "license": { "type": "string" },
+          "source_url": { "type": "string" },
+          "attribution": { "type": "string" },
+          "retrieved_at": { "type": "string" },
+          "beat_hint": { "type": "string" },
+          "notes": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
     },
     "sources": {
       "type": "array",

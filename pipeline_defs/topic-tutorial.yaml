@@ -1,10 +1,12 @@
 name: topic-tutorial
-version: "2.0"
+version: "3.0"
 description: >
-  Local-first hybrid tutorial and explainer video pipeline. Ingests local files,
-  code repositories, documentation, and media via universal_ingestor, synthesizes high-quality
-  narration using Apple Silicon MLX Audio (or Piper TTS fallback), plans subject-specific visual
-  scenes, and provides graceful degradation for presenter avatars at $0 recurring cost.
+  Agent-driven tutorial pipeline (v3, spec docs/topic-tutorial-v3-handoff.md). Takes a code repo,
+  website URL(s), PDF(s) or a topic and produces a 16:9 tutorial presented by a beautified
+  digital twin of the owner (built once by presenter-onboarding; if the twin fails, the video has
+  no presenter), with real sandbox-captured footage, diagrams and rights-cleared media. Runs
+  natively on Apple Silicon at $0 by default; every paid call is itemized at proposal.
+  Gates: proposal, scene_plan, assets, compose. Stage models: config/topic-tutorial/model_routing.yaml.
 category: hybrid
 stability: production
 default_checkpoint_policy: guided
@@ -73,9 +75,13 @@ stages:
       - universal_ingestor
       - video_analyzer
       - transcript_fetcher
-      - video_downloader
+      - video_downloader        # reference-video analysis ONLY (never a source of clips in the video)
       - scene_detect
       - frame_sampler
+      - sandbox_capture         # self-captured URL screenshots / evidence
+      - pexels_image            # open-licensed stills (needs PEXELS_API_KEY; check get_status)
+      - pixabay_image           # open-licensed stills (needs PIXABAY_API_KEY; check get_status)
+      - direct_clip_search      # archive/open footage discovery
     checkpoint_required: false
     human_approval_default: false
     review_focus:
@@ -85,7 +91,8 @@ stages:
     success_criteria:
       - Schema-valid research_brief with at least 3 data points
       - At least 3 angles discovered
-      - All sources cited with valid URIs or file paths
+      - Every claim has a source_ref (URL, file+line, or PDF page); key claims have 2+ independent sources
+      - Media sourcing candidates carry rights_status, license, source_url, attribution
 
   - name: proposal
     skill: pipelines/topic-tutorial/proposal-director
@@ -99,11 +106,12 @@ stages:
     human_approval_default: true
     review_focus:
       - Concepts reflect source material accurately
-      - Cost estimate confirms $0.00 for local production
-      - Composition runtime choice is explicitly logged
+      - Every paid call is itemized in cost_estimate.paid_calls (default total $0.00)
+      - Presenter plan, capture plan, music plan and playbook verified flag are shown
+      - Composition runtime and composition mode choices are explicitly logged
     success_criteria:
       - Schema-valid proposal_packet with at least 2 distinct concepts
-      - Itemized cost breakdown totaling $0.00
+      - Itemized paid_calls table with total_est_usd (approval covers estimate + 20%)
       - decision_log with render_runtime_selection entry
 
   - name: script
@@ -150,26 +158,33 @@ stages:
       - tts_selector
       - mlx_tts
       - piper_tts
-      - local_talking_head
-      - recorded_video
-      - gemini_personal_avatar_import
       - google_flow_import
       - gemini_omni_video
       - diagram_gen
       - screenshot_import
+      - sourced_image_import    # rights-checked import of one approved open-licensed still by URL
       - screen_recording_import
+      - script_aligner
+      - transcriber
       - alignment_provider
       - code_snippet
       - direct_clip_search
-      - cap_recorder
-      - screen_recorder
+      - pexels_image
+      - pixabay_image
+      - sandbox_capture
+      - presenter_profile
+      - twin_identity
+      - twin_idle_loop
+      - twin_performance_transfer
+      - twin_lipsync
+      - presenter_matte
       - threejs_world
-    checkpoint_required: false
-    human_approval_default: false
+    checkpoint_required: true
+    human_approval_default: true
     review_focus:
       - Narration audio generated with clean speech and dynamic sample rate
-      - Genuine word timestamps aligned with speech duration
-      - Presenter assets verified and registered or graceful fallback explicitly logged
+      - Word timings come from script-anchored alignment (asr_anchored); alignment_method is stated (heuristic fallback flagged)
+      - Presenter assets are beautified-twin assets from the presenter profile, or presenter_status is skipped_failed with a reason (never a fixture)
       - Visual assets (diagrams, screen captures, broll) satisfied for every visual beat
     success_criteria:
       - Schema-valid asset_manifest artifact containing audio and visual assets

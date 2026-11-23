@@ -5,6 +5,8 @@ import {
   useVideoConfig,
 } from "remotion";
 import { resolveAsset } from "../lib/resolveAsset";
+import { getLayout, toPx } from "../layouts";
+import { PresenterBackdrop, PresenterBackdropSpec } from "./PresenterBackdrop";
 
 export interface PresenterScreenSplitProps {
   presenterSrc: string;
@@ -12,6 +14,8 @@ export interface PresenterScreenSplitProps {
   presenterSide?: "left" | "right";
   splitRatio?: number; // default 0.35 (35% presenter, 65% screen)
   accentColor?: string;
+  alpha?: boolean;
+  backdrop?: PresenterBackdropSpec;
   children?: React.ReactNode;
 }
 
@@ -21,43 +25,35 @@ export const PresenterScreenSplit: React.FC<PresenterScreenSplitProps> = ({
   presenterSide = "left",
   splitRatio = 0.35,
   accentColor = "#22D3EE",
+  alpha = false,
+  backdrop,
   children,
 }) => {
-  const { fps } = useVideoConfig();
-
-  const presenterWidth = `${splitRatio * 100}%`;
-  const screenWidth = `${(1 - splitRatio) * 100}%`;
+  const { fps, width, height } = useVideoConfig();
+  const canvas = { width: width || 1920, height: height || 1080 };
+  const panels = getLayout(canvas.width, canvas.height).split(presenterSide, splitRatio);
+  const pr = toPx(panels.presenter, canvas);
+  const cr = toPx(panels.content, canvas);
 
   return (
-    <AbsoluteFill
-      style={{
-        display: "flex",
-        flexDirection: presenterSide === "left" ? "row" : "row-reverse",
-        backgroundColor: "#0F172A",
-        overflow: "hidden",
-      }}
-    >
-      {/* Presenter Panel */}
+    <AbsoluteFill style={{ backgroundColor: "#0F172A", overflow: "hidden" }}>
+      {/* Presenter Panel (alpha layer composited over the panel backdrop) */}
       <div
         style={{
-          width: presenterWidth,
-          height: "100%",
-          position: "relative",
+          position: "absolute", left: pr.x, top: pr.y, width: pr.w, height: pr.h,
           borderRight: presenterSide === "left" ? `2px solid ${accentColor}40` : undefined,
           borderLeft: presenterSide === "right" ? `2px solid ${accentColor}40` : undefined,
           overflow: "hidden",
           backgroundColor: "#0B1120",
         }}
       >
+        {alpha && backdrop && <PresenterBackdrop spec={backdrop} />}
         <OffthreadVideo
           src={resolveAsset(presenterSrc)}
           startFrom={Math.round(startFrom * fps)}
           muted
-          style={{
-            width: "100%",
-            height: "100%",
-            objectFit: "cover",
-          }}
+          transparent={alpha}
+          style={{ width: "100%", height: "100%", objectFit: alpha ? "contain" : "cover" }}
         />
         <div
           style={{
@@ -70,14 +66,7 @@ export const PresenterScreenSplit: React.FC<PresenterScreenSplitProps> = ({
       </div>
 
       {/* Screen / Diagram Panel */}
-      <div
-        style={{
-          width: screenWidth,
-          height: "100%",
-          position: "relative",
-          overflow: "hidden",
-        }}
-      >
+      <div style={{ position: "absolute", left: cr.x, top: cr.y, width: cr.w, height: cr.h, overflow: "hidden" }}>
         {children}
       </div>
     </AbsoluteFill>

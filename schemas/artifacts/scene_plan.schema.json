@@ -118,7 +118,7 @@
           "type": "object",
           "properties": {
             "enabled": { "type": "boolean" },
-            "preferred_source": { "type": "string", "enum": ["recorded_video", "gemini_avatar", "local_lipsync", "cloud_avatar", "none"] },
+            "preferred_source": { "type": "string", "enum": ["twin_auto", "twin_hybrid", "twin_local", "none"] },
             "fallback": { "type": "string", "enum": ["visual_explainer", "diagram", "none"] },
             "pip_allowed": { "type": "boolean" }
           }
@@ -142,6 +142,19 @@
                   "required": ["beat_id", "visual_type"],
                   "properties": {
                     "beat_id": { "type": "string" },
+                    "focus_region": {
+                      "type": "object",
+                      "description": "Normalized {x,y,w,h} (0-1 of canvas) of what matters in this beat; the PIP never covers it and 9:16 re-layout crops to it.",
+                      "required": ["x", "y", "w", "h"],
+                      "properties": {
+                        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+                        "y": { "type": "number", "minimum": 0, "maximum": 1 },
+                        "w": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+                        "h": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
+                      },
+                      "additionalProperties": false
+                    },
+                    "capture_script": { "type": "object", "description": "Sandbox capture script (schemas/artifacts/capture_script.schema.json) shown at the scene_plan gate." },
                     "duration_hint_seconds": { "type": "number", "minimum": 0 },
                     "visual_type": {
                       "type": "string",
@@ -149,6 +162,9 @@
                         "presenter_fullscreen",
                         "presenter_pip",
                         "presenter_screen_split",
+                        "sandbox_capture",
+                        "sourced_image",
+                        "sourced_clip",
                         "screen_recording",
                         "screenshot_callout",
                         "screenshot_scene",

@@ -1,7 +1,9 @@
-"""Recorded Presenter Video Provider (P0 dependable path).
+"""Owner recording intake — ONBOARDING SOURCE ONLY (topic-tutorial v3, spec D3).
 
-Accepts user-recorded webcam or phone video, validates video container and streams
-via ffprobe, and registers the verified presenter video asset in the project manifest.
+Validates the owner's raw recordings (face turn, performance, voice read) via ffprobe
+for the one-time ``presenter-onboarding`` pipeline. The recordings are source
+material only: they are stored privately, never copied under ``projects/``, and
+never rendered in a video. The rendered presenter is the beautified digital twin.
 """
 
 from __future__ import annotations
@@ -43,10 +45,7 @@ class RecordedVideoProvider(BaseTool):
     agent_skills = ["ffmpeg"]
 
     capabilities = [
-        "recorded_presenter_ingestion",
-        "fullscreen_presenter",
-        "pip_presenter",
-        "split_screen_presenter",
+        "onboarding_recording_validation",
     ]
 
     supports = {
@@ -56,8 +55,7 @@ class RecordedVideoProvider(BaseTool):
     }
 
     best_for = [
-        "authentic host tutorials using real phone or webcam footage",
-        "zero-cost reliable presenter video without AI avatar models",
+        "validating the owner's raw onboarding recordings (never rendered)",
     ]
 
     input_schema = {
@@ -121,6 +119,14 @@ class RecordedVideoProvider(BaseTool):
 
         sync_mode = inputs.get("sync_mode", "external_driving_audio")
         output_path_str = inputs.get("output_path")
+        if output_path_str and "projects" in {p.lower() for p in Path(output_path_str).resolve().parts}:
+            return ToolResult(
+                success=False,
+                error=(
+                    "Raw owner recordings are onboarding sources only and must never be copied "
+                    "into a project workspace or rendered (topic-tutorial spec D3)."
+                ),
+            )
         if output_path_str:
             dest_video = Path(output_path_str).resolve()
             dest_video.parent.mkdir(parents=True, exist_ok=True)
@@ -173,12 +179,13 @@ class RecordedVideoProvider(BaseTool):
         asset_record = {
             "asset_id": asset_id,
             "id": asset_id,
-            "asset_type": "presenter_video",
-            "type": "presenter_video",
+            "asset_type": "onboarding_source",
+            "type": "onboarding_source",
+            "identity_transform": "none",
             "path": str(dest_video),
             "provider_id": "recorded_video",
             "runtime": "local",
-            "source_type": "user_supplied",
+            "source_type": "owner_raw",
             "source_reference": str(src_video),
             "sha256": sha256,
             "duration_seconds": round(duration, 2),

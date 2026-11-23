@@ -298,6 +298,25 @@
             "additionalProperties": false
           }
         },
+        "paid_calls": {
+          "type": "array",
+          "description": "topic-tutorial: every paid call itemized. Approval covers these up to total_est_usd * 1.2; anything else pauses and asks (lib/paid_call_guard.py).",
+          "items": {
+            "type": "object",
+            "required": ["tool", "provider", "model", "purpose", "units", "unit_cost", "est_usd"],
+            "properties": {
+              "tool": { "type": "string" },
+              "provider": { "type": "string" },
+              "model": { "type": "string" },
+              "purpose": { "type": "string" },
+              "units": { "type": "number", "minimum": 0 },
+              "unit_cost": { "type": "number", "minimum": 0 },
+              "est_usd": { "type": "number", "minimum": 0 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "total_est_usd": { "type": "number", "minimum": 0, "description": "Sum of paid_calls[].est_usd" },
         "budget_cap_usd": {
           "type": "number",
           "minimum": 0,

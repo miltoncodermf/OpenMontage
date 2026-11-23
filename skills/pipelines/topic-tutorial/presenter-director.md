@@ -1,24 +1,24 @@
-# Presenter Director — Topic Tutorial Pipeline
+# Presenter Director — topic-tutorial v3
 
-## When to Use
+**Read first:** `skills/pipelines/avatar-spokesperson/asset-director.md` (presenter asset handling, lip-sync QA). Spec: `docs/topic-tutorial-v3-handoff.md` §5.5. Model tier: standard.
 
-You are the **Presenter Director** for the `topic-tutorial` pipeline. You manage the acquisition, validation, and layout routing of the host/presenter track.
+## topic-tutorial deltas
 
-## Presenter Architecture & Provider Order
+**The presenter is a beautified photoreal digital twin of the owner (D2).** Raw recordings are source material only — stored privately, never rendered, never copied under `projects/`. Every presenter asset must carry `identity_transform: "beautified"` and a `profile_id`; `lib/presenter_guard.py` rejects anything else. No Kling, no cloud avatars, no cartoon fallback.
 
-1. **Recorded Presenter Video (`recorded_video`) [P0 Default]:**
-   The primary and most reliable path. Accepts a real webcam or phone recording of the user speaking.
-   - `original_audio`: Video audio is retained and mastered as master narration.
-   - `external_driving_audio`: Audio is driven by TTS while video provides visual host presence.
-2. **Gemini Personal Avatar Import (`gemini_personal_avatar_import`) [P1]:**
-   Optional manual import of user-generated clips created with their official `@[username]` avatar in Gemini Apps. Validates container, resolution, and user likeness rights.
-3. **Local/Cloud Lip-Sync Providers [P2 Experimental]:**
-   Optional experimental models benchmarked on the local host. Requires verified lip-sync sync metrics.
-4. **Explicit Visual Fallback:**
-   When no presenter asset is provided, mark `presenter_status: "skipped_unavailable"` and transition the beat cleanly to a vector diagram or screen demonstration. Never use a static portrait or fake audio-reactive pulsing ring as an avatar substitute.
+### Per-video generation order
+1. **Load the profile** (`presenter_profile`): locked, hashes verify. Not locked → stop; no-presenter or run onboarding.
+2. **Wardrobe:** pick a catalog variant by topic tags or create a new simple one (Gemini image edit from `identity/canonical.png`, same face/lighting/framing); cache it in the profile. Log `presenter_wardrobe`.
+3. **Motion source** (engine from the owner's bake-off default, announced at proposal; both stay supported):
+   - **Hybrid:** if `loops/<variant>/idle.mp4` is missing, generate an 8–10 s idle loop (breathing, blinks, slight head motion, mouth closed) via `gemini_omni_video` (or `veo_video` with first=last frame if available). Paid call → must be itemized; announce first. API failure → ask the owner before using the Google Flow browser fallback (D8).
+   - **Local:** LivePortrait retargets `raw/performance.mov` motion onto the variant image → `performance/<variant>.mp4` (overnight OK; run alone).
+4. **Lip-sync** each presenter segment to its narration WAV with `twin_lipsync` (MuseTalk-MLX, including the full-screen route; LatentSync is deferred by owner decision and unavailable), looping/ping-ponging the motion source to length. Per-segment outputs so a long run resumes.
+5. **Matte:** `presenter_matte` → alpha version (ProRes 4444 or VP9 alpha). The presenter is always a **separate alpha layer**, never baked into a plate.
+6. **QA:** face present in ≥ 98 % of frames; mouth–audio offset within ±2 frames; no frame perceptually identical to `raw/` frames; `identity_transform == "beautified"`.
+7. **Failure → no presenter:** re-plan presenter beats into visual beats, log `presenter_status: "skipped_failed"` with reason, surface at the assets gate.
 
-## Layout Presets
+### Layout presets (normalized, aspect-aware)
+`presenter_fullscreen` (medium shot, safe headroom, lower-third badge), `presenter_pip` (≈ 22–28 % of width, safe corner, margins in normalized units, captions unobstructed), `presenter_screen_split` (≈ 35 % presenter / 65 % content).
 
-- `presenter_fullscreen`: Upper-body framing with safe headroom, subtle camera push-in, and lower-third topic badge.
-- `presenter_pip`: Presenter window occupies 22–28% of canvas width in a safe corner (default `bottom-right`), with 5–6% canvas margin, rounded corners, drop shadow, and subtle accent border. Ensure captions and critical UI controls remain unobstructed.
-- `presenter_screen_split`: 35% presenter panel on left/right, 65% software UI or diagram panel on the other side.
+### Memory
+Never run lip-sync/LivePortrait concurrently with captures or Remotion renders; release MLX memory between steps. Any model download ≥ 500 MB: disk check + owner confirmation first.

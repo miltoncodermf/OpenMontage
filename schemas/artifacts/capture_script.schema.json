@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/capture_script",
+  "title": "Capture script",
+  "description": "Sandbox capture script authored by the scene director and reviewed by the owner at the scene_plan gate (spec §5.7). Unknown actions fail validation.",
+  "type": "object",
+  "required": ["capture_id", "surface", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "capture_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+    "surface": { "type": "string", "enum": ["code_server", "browser", "terminal"] },
+    "allow_domains": {
+      "type": "array",
+      "description": "Hostnames (and their subdomains) the sandbox may reach. Empty = no network at all.",
+      "items": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$" },
+      "uniqueItems": true
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 80,
+      "items": {
+        "oneOf": [
+          { "type": "object", "required": ["action", "path"], "additionalProperties": false,
+            "properties": { "action": { "const": "open_file" }, "path": { "type": "string", "minLength": 1 }, "line": { "type": "integer", "minimum": 1 } } },
+          { "type": "object", "required": ["action", "text"], "additionalProperties": false,
+            "properties": { "action": { "const": "type_in_terminal" }, "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+              "wpm": { "type": "integer", "minimum": 60, "maximum": 400 }, "enter": { "type": "boolean" } } },
+          { "type": "object", "required": ["action", "text"], "additionalProperties": false,
+            "properties": { "action": { "const": "wait_for_text" }, "text": { "type": "string", "minLength": 1 },
+              "timeout_s": { "type": "number", "minimum": 1, "maximum": 300 } } },
+          { "type": "object", "required": ["action", "label"], "additionalProperties": false,
+            "properties": { "action": { "const": "screenshot" }, "label": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" } } },
+          { "type": "object", "required": ["action", "url"], "additionalProperties": false,
+            "properties": { "action": { "const": "navigate" }, "url": { "type": "string", "pattern": "^https?://" } } },
+          { "type": "object", "required": ["action", "selector"], "additionalProperties": false,
+            "properties": { "action": { "const": "click" }, "selector": { "type": "string", "minLength": 1 } } },
+          { "type": "object", "required": ["action", "seconds"], "additionalProperties": false,
+            "properties": { "action": { "const": "pause" }, "seconds": { "type": "number", "minimum": 0.1, "maximum": 30 } } },
+          { "type": "object", "required": ["action"], "additionalProperties": false,
+            "properties": { "action": { "const": "await_owner_login" }, "note": { "type": "string" } } }
+        ]
+      }
+    }
+  }
+}

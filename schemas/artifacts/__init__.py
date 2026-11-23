@@ -32,6 +32,11 @@ ARTIFACT_NAMES = [
     "character_qa_report",
     "video_analysis_brief",
     "reference_style_profile",
+    "inputs",
+    "input_manifest",
+    "fact_sheet",
+    "capture_script",
+    "presenter_profile",
 ]
 
 

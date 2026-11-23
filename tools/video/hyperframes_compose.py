@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import time
+from lib.heavy_lock import DEFAULT_RENDER_WAIT_S, heavy_job
 from pathlib import Path
 from typing import Any, Optional
 
@@ -506,9 +507,11 @@ class HyperFramesCompose(BaseTool):
             elif operation == "check":
                 result = self._check(inputs)
             elif operation == "render":
-                result = self._render(inputs)
+                with heavy_job("hyperframes_compose:render", wait=DEFAULT_RENDER_WAIT_S):
+                    result = self._render(inputs)
             elif operation == "render_existing":
-                result = self._render_existing(inputs)
+                with heavy_job("hyperframes_compose:render_existing", wait=DEFAULT_RENDER_WAIT_S):
+                    result = self._render_existing(inputs)
             elif operation == "add_block":
                 result = self._add_block(inputs)
             else:

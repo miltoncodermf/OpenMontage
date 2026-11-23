@@ -117,10 +117,20 @@ def pytest_configure(config):
         "live_api: test performs a real, billable API call. Skipped unless "
         f"{_ALLOW_ENV_FLAG}=1 is set.",
     )
+    config.addinivalue_line(
+        "markers",
+        "smoke: local end-to-end smoke test (real TTS + Remotion render, no paid APIs). "
+        "Opt-in: run with `-m smoke`; skipped otherwise.",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip live_api tests unless the operator explicitly opted in."""
+    """Skip live_api tests unless the operator explicitly opted in; skip smoke unless `-m smoke`."""
+    if "smoke" not in (config.getoption("-m") or ""):
+        skip_smoke = pytest.mark.skip(reason="smoke test is opt-in: run with `-m smoke`")
+        for item in items:
+            if "smoke" in item.keywords:
+                item.add_marker(skip_smoke)
     if _network_allowed():
         return
     skip = pytest.mark.skip(

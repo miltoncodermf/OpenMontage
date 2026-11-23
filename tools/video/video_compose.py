@@ -38,6 +38,7 @@ import secrets
 import shutil
 import subprocess
 import time
+from lib.heavy_lock import DEFAULT_RENDER_WAIT_S, heavy_job
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
@@ -254,7 +255,7 @@ class VideoCompose(BaseTool):
         "narration_transcript_path", "playbook", "playbook_name", "scene_plan",
         "quality", "fps", "workspace_path", "public_dir", "strict",
         "strict_check", "skip_contrast", "snapshots",
-        "remotion_browser_executable", "remotion_concurrency",
+        "remotion_browser_executable", "remotion_concurrency", "master_loudness",
     ]
     side_effects = ["writes video file to output_path"]
     user_visible_verification = [
@@ -372,9 +373,11 @@ class VideoCompose(BaseTool):
             if operation == "compose":
                 result = self._compose(inputs)
             elif operation == "render":
-                result = self._render(inputs)
+                with heavy_job("video_compose:render", wait=DEFAULT_RENDER_WAIT_S):  # spec §9: never overlap heavy jobs
+                    result = self._render(inputs)
             elif operation == "remotion_render":
-                result = self._remotion_render(inputs)
+                with heavy_job("video_compose:remotion_render", wait=DEFAULT_RENDER_WAIT_S):
+                    result = self._remotion_render(inputs)
             elif operation == "burn_subtitles":
                 result = self._burn_subtitles(inputs)
             elif operation == "overlay":
@@ -1134,6 +1137,7 @@ class VideoCompose(BaseTool):
             edit_decisions=edit_decisions,
             proposal_packet=inputs.get("proposal_packet"),
             narration_transcript_path=inputs.get("narration_transcript_path"),
+            asset_manifest=inputs.get("asset_manifest"),
             script_text=inputs.get("script_text"),
         )
 
@@ -1722,8 +1726,11 @@ class VideoCompose(BaseTool):
             )
         # --- Explicit Remotion path (render_runtime == 'remotion') ---
         if self._needs_remotion(resolved_cuts):
+            # ``edit_decisions`` is schema-limited (its cuts cannot carry type/diagramSpec/screenshotSteps/...), so a
+            # caller that has the full Remotion props passes them as ``composition_data``; those are what get rendered,
+            # while edit_decisions stays the contract that QA (loudness target, diagram cuts, honesty) is checked against.
             remotion_inputs: dict[str, Any] = {
-                "edit_decisions": dict(edit_decisions, cuts=resolved_cuts),
+                "edit_decisions": inputs.get("composition_data") or dict(edit_decisions, cuts=resolved_cuts),
                 "output_path": str(output_path),
             }
             if profile:
@@ -1763,6 +1770,23 @@ class VideoCompose(BaseTool):
                 if not mux_result.success:
                     return mux_result
                 render_result.data["has_mixed_audio"] = True
+            # EBU R128 mastering (topic-tutorial): two-pass loudnorm on the rendered file BEFORE the final review, so
+            # the review measures the delivered master, not the raw mix.
+            _target = (edit_decisions.get("metadata") or {}).get("loudness_target_lufs")
+            if _target is not None and output_path.exists() and inputs.get("master_loudness", True):
+                try:
+                    from lib.loudness import master_two_pass
+
+                    _raw = output_path.with_name(output_path.stem + ".premaster" + output_path.suffix)
+                    output_path.replace(_raw)
+                    _m = master_two_pass(_raw, output_path, float(_target))
+                    render_result.data = render_result.data or {}
+                    render_result.data["loudness_master"] = {**_m, "premaster_file": str(_raw)}
+                except Exception as exc:  # noqa: BLE001 - surfaced in the render data; final review re-measures anyway
+                    if "_raw" in locals() and _raw.exists() and not output_path.exists():
+                        _raw.replace(output_path)
+                    render_result.data = render_result.data or {}
+                    render_result.data["loudness_master_error"] = str(exc)
         else:
             # --- FFmpeg fallback: only when Remotion is unavailable ---
             options = inputs.get("options", {})
@@ -1793,6 +1817,7 @@ class VideoCompose(BaseTool):
                 edit_decisions,
                 inputs.get("proposal_packet"),
                 narration_transcript_path=inputs.get("narration_transcript_path"),
+                asset_manifest=asset_manifest,
                 script_text=inputs.get("script_text") or self._read_text_file(
                     inputs.get("script_path")
                 ),
@@ -1930,6 +1955,7 @@ class VideoCompose(BaseTool):
                 edit_decisions,
                 inputs.get("proposal_packet"),
                 narration_transcript_path=inputs.get("narration_transcript_path"),
+                asset_manifest=asset_manifest,
                 script_text=inputs.get("script_text") or self._read_text_file(
                     inputs.get("script_path")
                 ),
@@ -1990,6 +2016,7 @@ class VideoCompose(BaseTool):
                 edit_decisions,
                 inputs.get("proposal_packet"),
                 narration_transcript_path=inputs.get("narration_transcript_path"),
+                asset_manifest=inputs.get("asset_manifest"),
                 script_text=inputs.get("script_text") or self._read_text_file(
                     inputs.get("script_path")
                 ),
@@ -2383,6 +2410,7 @@ class VideoCompose(BaseTool):
         proposal_packet: dict[str, Any] | None = None,
         narration_transcript_path: str | Path | None = None,
         script_text: str | None = None,
+        asset_manifest: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run post-render self-review and produce a final_review artifact.
 
@@ -2749,11 +2777,53 @@ class VideoCompose(BaseTool):
         )
         issues.extend(transcript_comparison.get("issues", []))
 
+        # --- 6a. EBU R128 loudness (topic-tutorial: -14 LUFS ±1, TP <= -1 dBTP) ---
+        loudness_check: dict[str, Any] | None = None
+        target_lufs = ((edit_decisions or {}).get("metadata") or {}).get("loudness_target_lufs")
+        if target_lufs is not None and technical_probe.get("has_audio"):
+            try:
+                from lib.loudness import LUFS_TOLERANCE, TP_LIMIT, measure, within_target
+
+                m = measure(output_path)
+                ok = within_target(m, float(target_lufs))
+                loudness_check = {**m, "target_lufs": float(target_lufs), "tolerance_lu": LUFS_TOLERANCE,
+                                  "true_peak_limit_dbtp": TP_LIMIT, "within_target": ok, "issues": []}
+                if not ok:
+                    loudness_check["issues"].append(
+                        f"Loudness out of target: {m['integrated_lufs']:.1f} LUFS / {m['true_peak_dbtp']:.1f} dBTP "
+                        f"(target {float(target_lufs):.0f} ±{LUFS_TOLERANCE:.0f} LUFS, TP <= {TP_LIMIT:.0f} dBTP)")
+            except Exception as e:  # noqa: BLE001
+                loudness_check = {"within_target": None, "issues": [f"Loudness measurement not run: {e}"]}
+            issues.extend(loudness_check["issues"])
+
+        # --- 6a2. Diagram legibility at the ACTUAL rendered size (topic-tutorial, spec §5.9) ---
+        legibility_check: dict[str, Any] | None = None
+        diagram_cuts = ((edit_decisions or {}).get("metadata") or {}).get("diagram_cuts")
+        if diagram_cuts:
+            from lib.diagram_legibility import validate_cuts
+
+            meta_canvas = ((edit_decisions or {}).get("metadata") or {}).get("canvas") or {}
+            try:
+                width, height = (int(v) for v in str(technical_probe.get("resolution", "")).split("x"))
+            except ValueError:
+                width, height = int(meta_canvas.get("width") or 1920), int(meta_canvas.get("height") or 1080)
+            problems = validate_cuts(diagram_cuts, {"width": width, "height": height})
+            legibility_check = {"canvas": {"width": width, "height": height}, "diagrams_checked": len(diagram_cuts),
+                                "legible": not problems, "issues": [f"Diagram illegible: {p}" for p in problems]}
+            issues.extend(legibility_check["issues"])
+
+        # --- 6b. Honesty guard (topic-tutorial): fixtures never count as real ---
+        from lib.honesty_guard import honesty_check
+
+        honesty = honesty_check(edit_decisions, asset_manifest)
+        issues.extend(honesty["issues"])
+
         # --- 7. Determine overall status ---
         critical_issues = [
             i for i in issues
             if any(kw in i.lower() for kw in [
-                "silent downgrade", "delivery promise violation",
+                "silent downgrade", "delivery promise violation", "loudness out of target",
+                "diagram illegible",
                 "effectively silent", "ffprobe failed", "suspiciously short",
                 "tts punctuation leak",  # reading literal punctuation aloud
             ])
@@ -2773,6 +2843,10 @@ class VideoCompose(BaseTool):
             status = "fail"
             recommended_action = "re_render"
 
+        if honesty["blocking"]:
+            status = "fail"
+            recommended_action = "replace_test_assets"
+
         final_review = {
             "version": "1.0",
             "output_path": str(output_path),
@@ -2784,6 +2858,9 @@ class VideoCompose(BaseTool):
                 "promise_preservation": promise_preservation,
                 "subtitle_check": subtitle_check,
                 "transcript_comparison": transcript_comparison,
+                "honesty_guard": honesty,
+                **({"loudness": loudness_check} if loudness_check is not None else {}),
+                **({"diagram_legibility": legibility_check} if legibility_check is not None else {}),
             },
             "issues_found": issues,
             "recommended_action": recommended_action,

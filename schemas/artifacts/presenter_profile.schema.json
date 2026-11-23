@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/presenter_profile",
+  "title": "Presenter profile",
+  "description": "profile.json of a private presenter profile (~/.openmontage/presenter_profiles/<profile_id>/). Never stored in git or under projects/. A locked profile carries sha256 hashes of every file (spec D4, §5.5).",
+  "type": "object",
+  "required": ["version", "profile_id", "locked", "files"],
+  "properties": {
+    "standin": { "type": "boolean", "description": "Dev-only stand-in (fictional person) used to validate engines. Assets from it can NEVER pass final_review outside test mode and never count as a real presenter." },
+    "standin_note": { "type": "string" },
+    "version": { "type": "string", "const": "1.0" },
+    "profile_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+    "display_name": { "type": "string" },
+    "created_at": { "type": "string" },
+    "locked": { "type": "boolean" },
+    "locked_at": { "type": "string" },
+    "owner_consent": {
+      "type": "object",
+      "properties": { "likeness_consent": { "type": "boolean" }, "recorded_on": { "type": "string" }, "statement": { "type": "string", "description": "What the owner agreed to, as recorded by the agent." } }
+    },
+    "raw": {
+      "type": "object",
+      "description": "Owner recordings — source material only, NEVER rendered.",
+      "properties": {
+        "face_turn": { "$ref": "#/$defs/recording" },
+        "performance": { "$ref": "#/$defs/recording" },
+        "voice_read": { "$ref": "#/$defs/recording" }
+      },
+      "additionalProperties": false
+    },
+    "identity": {
+      "type": "object",
+      "required": ["canonical"],
+      "properties": {
+        "canonical": { "type": "string", "description": "Relative path, e.g. identity/canonical.png" },
+        "picked_candidate": { "type": "string" },
+        "candidates": { "type": "array", "items": { "type": "string" } },
+        "model": { "type": "string" },
+        "tweaks": { "type": "string" },
+        "wardrobe_catalog": { "type": "string" },
+        "hair_catalog": { "type": "string" },
+        "background_catalog": { "type": "string" },
+        "candidate_meta": { "type": "object" },
+        "defaults": {
+          "type": "object",
+          "description": "Owner's default variants; every other catalog entry stays selectable per tutorial",
+          "properties": { "hairstyle": { "type": "string" }, "background": { "type": "string" } }
+        },
+        "identity_transform": { "const": "beautified" }
+      }
+    },
+    "voice": {
+      "type": "object",
+      "required": ["profile"],
+      "properties": {
+        "profile": { "type": "string", "description": "Relative path, e.g. voice/voice_profile.json" },
+        "picked_candidate": { "type": "string" },
+        "engine": { "type": "string" },
+        "variant": { "type": "string", "description": "Voice-quality variant (reference cleaning, polish chain, output de-reverb)" },
+        "speed": { "type": "number", "description": "Narration tempo factor (< 1 = slower), applied as a pitch-preserving time-stretch" },
+        "watermark_note": { "type": "string" }
+      }
+    },
+    "engine_default": { "type": "string", "enum": ["hybrid", "local"], "description": "Twin engine default chosen after the P5 bake-off." },
+    "mutable_caches": { "type": "array", "items": { "type": "string" }, "description": "Path prefixes of derived caches (outfits, idle loops, performance clips) that grow after the lock and are not in the manifest" },
+    "files": {
+      "type": "object",
+      "description": "relative path -> sha256 of every file in the profile except profile.json and the mutable caches",
+      "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "locked": { "const": true } }, "required": ["locked"] },
+      "then": {
+        "required": ["identity", "voice", "locked_at"],
+        "properties": { "files": { "minProperties": 2 } }
+      }
+    }
+  ],
+  "$defs": {
+    "recording": {
+      "type": "object",
+      "required": ["file", "sha256"],
+      "properties": {
+        "file": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "probe": { "type": "object" },
+        "working": {
+          "type": "object",
+          "required": ["file", "sha256"],
+          "description": "SDR bt709 8-bit upright H.264 working copy (still raw footage: never rendered). Pixel-reading tools use this, not the phone original.",
+          "properties": {
+            "file": { "type": "string" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "normalization": { "type": "object" }
+          }
+        }
+      }
+    }
+  }
+}

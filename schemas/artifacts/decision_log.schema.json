@@ -41,7 +41,15 @@
               "capability_extension",
               "playbook_override",
               "visual_accuracy_check",
-              "approval_policy"
+              "approval_policy",
+              "model_routing",
+              "presenter_engine",
+              "presenter_wardrobe",
+              "voice_profile",
+              "music",
+              "playbook",
+              "capture_plan",
+              "alignment_method"
             ],
             "description": "What class of decision this is"
           },
