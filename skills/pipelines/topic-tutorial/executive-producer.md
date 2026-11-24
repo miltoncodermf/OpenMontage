@@ -12,10 +12,10 @@ A 16:9 (1920×1080, 30 fps) tutorial from one input — a **code repo, website U
 For every stage: read the stage director skill, produce the canonical artifact, self-review (`skills/meta/reviewer.md`, max 2 rounds), checkpoint (`skills/meta/checkpoint-protocol.md`). Gates are the four 🛑 stages; each is a one-line `human_approval_default` toggle in the manifest. **Approval is per gate** — end your turn at each one. No autopilot in v3.
 
 ### Model routing (D12)
-Read `config/topic-tutorial/model_routing.yaml` (`lib/model_routing.py`). For each stage, spawn a sub-agent with the Claude Code `Agent` tool, `model:` = the tier's `claude_code` value (`deep`=opus, `standard`=sonnet, `fast`=haiku), passing: the stage director skill path, input artifact paths, the expected output artifact path. Rules:
+Read `config/topic-tutorial/model_routing.yaml` (`lib/model_routing.py`). For each stage, spawn a sub-agent with the Claude Code `Agent` tool, `model:` = the tier's `claude_code` value (`deep`=opus, `standard`=sonnet, `fast`=haiku) and `effort:` = the stage's resolved effort (`lib.model_routing.model_for_stage(stage)["effort"]`; defaults deep=high, standard=medium, fast=low, a stage may override), passing: the stage director skill path, input artifact paths, the expected output artifact path. Rules:
 - The **main session** owns checkpoints, gates, `decision_log`, and all communication with the owner.
 - Sub-agents **never** talk to the owner and **never** write checkpoints. They return the artifact and findings.
-- Append one `decision_log` entry per stage (`category: "model_routing"`, `subject: "<stage> model"`), recording tier + `model_id`. Re-log with the same subject if the tier is changed.
+- Append one `decision_log` entry per stage (`category: "model_routing"`, `subject: "<stage> model"`), recording tier + `model_id` + effort. Re-log with the same subject if the tier or effort is changed.
 
 ### Presenter rule (D2, D3)
 The presenter is the beautified twin from the locked profile in `~/.openmontage/presenter_profiles/<profile_id>/` (`OPENMONTAGE_PROFILE_ROOT` overrides). Preflight must confirm a **locked** profile exists; if not, stop and tell the owner to run `presenter-onboarding` (or proceed with **no presenter** if they say so). The owner's raw recordings are never rendered. If the twin cannot be produced or fails QA, the video is made **without a presenter** (`presenter_status: "skipped_failed"` + reason, surfaced at the assets gate). No stylized fallback, no Kling, no cloud avatar. A fixture/placeholder is never a presenter.

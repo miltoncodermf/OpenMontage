@@ -846,6 +846,23 @@ class TestV3RoutingAndSkills:
         for stage in get_pipeline_stages("topic-tutorial"):
             assert model_for_stage(stage, routing)["claude_code"] in {"opus", "sonnet", "haiku"}, stage
 
+    def test_routing_effort(self):
+        from lib.model_routing import effort_for_stage, load_routing, model_for_stage, validate_routing
+
+        routing = load_routing()
+        assert model_for_stage("script", routing)["effort"] == "high"
+        assert model_for_stage("script", routing)["claude_code"] == "opus"
+        assert effort_for_stage("assets", routing) == "medium"
+        assert effort_for_stage("publish", routing) == "low"
+        assert model_for_stage("voice_lab", routing, section="onboarding")["effort"] == "medium"
+        tiers = {t: {"claude_code": "x", "model_id": "x", "gemini_cli": "x"} for t in ("deep", "standard", "fast")}
+        custom = {"tiers": tiers, "stages": {"script": {"tier": "deep", "effort": "max"}, "edit": "standard"}}
+        validate_routing(custom)
+        assert effort_for_stage("script", custom) == "max"
+        assert effort_for_stage("edit", custom) == "medium"  # tier default when the tier sets none
+        with pytest.raises(ValueError):
+            validate_routing({"tiers": tiers, "stages": {"script": {"tier": "deep", "effort": "extreme"}}})
+
     def test_routing_rejects_unknown_tier(self):
         from lib.model_routing import validate_routing
 

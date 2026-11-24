@@ -34,6 +34,29 @@ If your checkout lives elsewhere, set `OPENMONTAGE_HOME` to it (for example in y
 | `--audience` | free text | none |
 | `--title` | free text | from the first input |
 
+## Models
+
+Start the session on Opus. Your session coordinates the run: it handles the gates and checkpoints, and talks to you.
+
+Each stage runs as a sub-agent. Its model and reasoning effort come from `config/topic-tutorial/model_routing.yaml`; edit that file to change any stage.
+
+| Stages | Model | Effort |
+|---|---|---|
+| Research planning and synthesis, proposal, script, scene plan, critics | Opus | high |
+| Research search workers, assets, edit, compose | Sonnet | medium |
+| Frame QA, publish | Haiku | low |
+
+These run on your Mac at no cost:
+
+| Job | Model |
+|---|---|
+| Voice | Chatterbox |
+| Twin motion | LivePortrait |
+| Lip-sync | MuseTalk |
+| Matte | BiRefNet |
+| Caption alignment | Whisper |
+| Render | Remotion |
+
 ## What happens
 
 1. **Input resolver:** `lib/tutorial_request.py` sorts the inputs and creates `projects/<id>/` with `inputs/inputs.yaml` and `inputs/request.json`.

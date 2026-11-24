@@ -1,11 +1,13 @@
-# Per-stage model tiers for the topic-tutorial pipeline (spec D12, §5.1).
-# Editable: change a stage's tier here; no manifest edit needed.
-# The main session reads this file and delegates each stage to a sub-agent on the tier's model.
+# Per-stage model tiers and reasoning effort for the topic-tutorial pipeline (spec D12, §5.1).
+# Editable: change a stage's tier or effort here; no manifest edit needed.
+# The main session reads this file and delegates each stage to a sub-agent on the tier's model,
+# passing the resolved effort (Agent tool `effort`). Efforts: low | medium | high | xhigh | max.
+# A stage is either `<tier>` or `{tier: <tier>, effort: <effort>}` to override the tier's effort.
 # `gemini_cli` names are placeholders — verify against the installed Gemini CLI before relying on them.
 tiers:
-  deep:     { claude_code: opus,   model_id: claude-opus-5-5,   gemini_cli: gemini-3.8-pro }
-  standard: { claude_code: sonnet, model_id: claude-sonnet-5-5, gemini_cli: gemini-3.8-flash }
-  fast:     { claude_code: haiku,  model_id: claude-haiku-5-5,  gemini_cli: gemini-3.8-flash-lite }
+  deep:     { claude_code: opus,   model_id: claude-opus-5-5,   gemini_cli: gemini-3.8-pro,        effort: high }
+  standard: { claude_code: sonnet, model_id: claude-sonnet-5-5, gemini_cli: gemini-3.8-flash,      effort: medium }
+  fast:     { claude_code: haiku,  model_id: claude-haiku-5-5,  gemini_cli: gemini-3.8-flash-lite, effort: low }
 stages:
   research.plan_and_synthesize: deep
   research.search_workers:      standard
